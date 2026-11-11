@@ -59,6 +59,18 @@
       "perMachine": false,
       "shortcutName": "Cabinet CAM",
       "artifactName": "Cabinet-CAM-Setup-${version}.${ext}"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Ianddds",
+        "repo": "cabinet-cam",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ianddds/cabinet-cam.git"
   }
 }
