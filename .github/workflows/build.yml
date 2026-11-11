@@ -1,0 +1,45 @@
+# Builds the Windows installer and publishes it as a GitHub Release.
+# Run it from the repository's Actions tab: "Build installer" -> Run workflow,
+# type the new version number (e.g. 0.2.0). Installed copies of Cabinet CAM
+# pick the release up as an update (the repository has to be public for that).
+name: Build installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number for this release (e.g. 0.2.0) - must be higher than the last one"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set the version
+        run: npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build and publish the installer
+        run: >
+          npx electron-builder --win --publish always
+          -c.publish.provider=github
+          -c.publish.owner=${{ github.repository_owner }}
+          -c.publish.repo=${{ github.event.repository.name }}
+          -c.publish.releaseType=release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
