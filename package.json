@@ -1,0 +1,64 @@
+{
+  "name": "cabinet-cam",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Onshape -> nesting -> G-code for cabinet case parts",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --watch --env-file-if-exists=.env server.js",
+    "test": "node test/run.js",
+    "app": "electron .",
+    "dist": "electron-builder --win --publish never"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "clipper-lib": "^6.4.2",
+    "express": "^4.21.0",
+    "electron-updater": "^6.3.9"
+  },
+  "main": "electron/main.js",
+  "author": "Cabinet CAM",
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.cabinetcam.app",
+    "productName": "Cabinet CAM",
+    "asar": false,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "server.js",
+      "package.json",
+      "lib/**/*",
+      "public/**/*",
+      "electron/**/*",
+      "test/synthetic.js",
+      "test/clipper-node.js",
+      "build/icon.png"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "shortcutName": "Cabinet CAM",
+      "artifactName": "Cabinet-CAM-Setup-${version}.${ext}"
+    }
+  }
+}

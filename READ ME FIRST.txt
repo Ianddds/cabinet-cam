@@ -1,0 +1,38 @@
+THE EASY WAY: if you were given "Cabinet-CAM-Setup-x.y.z.exe", just run it
+(Windows may say "unknown publisher": More info -> Run anyway). Then enter the
+Onshape API keys in the app (top right: "enter API keys") and skip the rest of
+this file except "FIRST TIME IN THE APP".
+
+CABINET CAM - SETUP ON A NEW PC
+===============================
+
+1. Unzip this folder somewhere permanent, e.g.  C:\Cabinet CAM
+   (not inside Downloads - it keeps its tools, remnants and jobs here).
+
+2. Double-click  "Install Cabinet CAM.bat"  (one time). It:
+     - installs Node.js if the PC doesn't have it (Windows may ask permission)
+     - installs the app's packages
+     - asks for the Onshape API keys and saves them in .env
+       (get them at https://dev-portal.onshape.com -> API keys, read access is enough,
+        or copy the .env file from another install into this folder first)
+     - puts a "Cabinet CAM" icon on the desktop
+
+3. Double-click the "Cabinet CAM" desktop icon. The browser opens at
+   http://localhost:3100. A minimised "Cabinet CAM" window runs the app -
+   close that window to stop it.
+
+FIRST TIME IN THE APP - set it up for THIS shop's machine and stock:
+   - Machine card: post-processor (FluidNC / LinuxCNC / ShopBot), Z0 (match how
+     the operator zeroes: material top or spoilboard), Safe Z,
+     park position, and the Machine profile (max speeds, acceleration, bit-change time)
+   - Tools card: this shop's bits (or copy data\tools.json from another install).
+     ShopBot: give each bit the Tool # the ShopBot uses (C9 / &Tool)
+   - Sheet card: sheet size, trim, Shared cut lines
+   - Labels: printer name / address if you use the Zebra
+   Remnants and jobs are kept per shop (they're physical racks and this PC's jobs).
+
+Before cutting real parts with a new machine: air-cut the first file with Z zeroed
+above the material, and tick "Simulate cut" in the sheet preview.
+
+UPDATING: copy everything inside the new cabinet-cam.zip's "Cabinet CAM" folder
+into this folder (replace files), then run "Update Cabinet CAM.bat".

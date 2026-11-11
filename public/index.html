@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cabinet CAM</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect x=%221%22 y=%223%22 width=%2214%22 height=%2210%22 rx=%221%22 fill=%22%23b5541b%22/%3E%3C/svg%3E" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Cabinet CAM</div>
+    <input id="jobName" class="job-name" placeholder="Job name" />
+    <button id="saveJob">Save</button>
+    <select id="openJob"><option value="">Open job…</option></select>
+    <span class="spacer"></span>
+    <span id="onshapeStatus" class="status">Onshape: …</span>
+  </header>
+
+  <main class="layout">
+    <aside class="side">
+      <section class="card">
+        <h2>Source</h2>
+        <label class="field">Part Studio URL
+          <input id="osUrl" placeholder="https://cad.onshape.com/documents/…/w/…/e/…" />
+        </label>
+        <div class="row">
+          <button id="fetchParts" class="primary">Get parts</button>
+          <button id="loadSample">Load sample</button>
+        </div>
+        <p id="sourceInfo" class="muted small"></p>
+        <button id="saveRaw" class="link" hidden>Save raw Onshape data (for troubleshooting)</button>
+      </section>
+
+      <section class="card">
+        <h2>Sheet</h2>
+        <div class="grid2">
+          <label class="field">Length X<input type="number" step="0.125" data-path="sheet.sheetW" /></label>
+          <label class="field">Width Y<input type="number" step="0.125" data-path="sheet.sheetH" /></label>
+          <label class="field">Edge trim<input type="number" step="0.0625" data-path="sheet.trim" /></label>
+          <label class="field" id="spacingF">Part spacing<input type="number" step="0.0625" data-path="sheet.spacing" /></label>
+          <label class="field" title="How long Nest &amp; toolpath searches for a better layout. Each material searches side by side. 0 = quick nest only.">Nest search (sec)<input type="number" step="1" min="0" max="60" data-path="nestSeconds" /></label>
+        </div>
+        <label class="check"><input type="checkbox" data-path="respectGrain" /> Respect grain (sheet grain along X)</label>
+        <label class="check" title="Parts nest exactly one profile-bit width apart, and an edge two parts share is cut once (about a quarter less outline cutting). The nest search also looks for layouts that line edges up."><input type="checkbox" data-path="commonLine" /> Shared cut lines (parts one bit apart)</label>
+      </section>
+
+      <section class="card" id="remnantsCard">
+        <h2>Remnants</h2>
+        <label class="check"><input type="checkbox" data-path="remnants.use" /> Nest on remnants before full sheets</label>
+        <label class="check"><input type="checkbox" data-path="remnants.cutFree" /> Cut kept offcuts free on the CNC</label>
+        <div class="grid2">
+          <label class="field" title="Clean-up margin left around a remnant's edges">Remnant trim<input type="number" step="0.0625" min="0" data-path="remnants.trim" /></label>
+          <label class="field" title="Offcuts are kept only when both sides are at least this">Keep: min side<input type="number" step="1" min="0" data-path="remnants.minSide" /></label>
+          <label class="field" title="…and the area is at least this (sq in)">Keep: min sq in<input type="number" step="12" min="0" data-path="remnants.minArea" /></label>
+        </div>
+        <div id="remnantList" class="remnant-list"></div>
+        <details class="remnant-add">
+          <summary class="small">Add a remnant by hand</summary>
+          <div class="grid2">
+            <label class="field span2">Material<input id="remMat" list="remMats" placeholder="exactly as the parts' material" /></label>
+            <datalist id="remMats"></datalist>
+            <label class="field">Thickness<input id="remT" type="number" step="0.001" /></label>
+            <label class="field" title="Along the grain">Length (grain)<input id="remW" type="number" step="0.125" /></label>
+            <label class="field">Width<input id="remH" type="number" step="0.125" /></label>
+            <label class="field">Note<input id="remNote" placeholder="rack, shelf…" /></label>
+          </div>
+          <button id="remAdd">Add remnant</button>
+        </details>
+      </section>
+
+      <section class="card">
+        <h2>Tools</h2>
+        <label class="field">Profile tool<select data-path="profileToolId" id="profileToolSel"></select></label>
+        <label class="field">Dado tool<select data-path="dadoToolId" id="dadoToolSel"></select></label>
+        <div class="field">Drill holes with
+          <div id="holeTools" class="checklist"></div>
+        </div>
+        <p class="muted small">Round holes within 0.006" of a hole tool (or the profile/dado bit) are drilled. Bigger blind holes are milled; bigger through holes get an inside contour.</p>
+        <button id="openLibrary" class="link">Edit tool library…</button>
+      </section>
+
+      <section class="card">
+        <h2>Cutting</h2>
+        <div class="grid2">
+          <label class="field">Safe Z<input type="number" step="0.05" data-path="safeZ" /></label>
+          <label class="field" title="Moving between cuts on the same part (dados, cutouts, outline, holes) the bit only lifts this far above the top instead of to Safe Z. 0 = always go to Safe Z">Hop height (same part)<input type="number" step="0.05" min="0" data-path="hopZ" /></label>
+          <label class="field">Overcut<input type="number" step="0.005" data-path="overcut" /></label>
+          <label class="field" title="The pass that frees the parts does parts smaller than this first, then the rest. Each group is a separate trip across the sheet, so 0 gives the least travel.">Free small parts first (sq in)<input type="number" step="10" min="0" data-path="smallPartArea" /></label>
+          <label class="field" title="Direction of the pass along a dado / rabbet's finished walls. Climb usually leaves the cleanest wall in plywood; Either picks whichever travels least (it can save a trip back down a long rabbet).">Wall pass
+            <select data-path="finishDir"><option value="climb">Climb</option><option value="conventional">Conventional</option><option value="either">Either (least travel)</option></select>
+          </label>
+          <label class="field" title="0 = plunge straight down (default). Above 0, pockets ramp down along the path at this angle instead (45° on a 1/4 deep dado is a 1/4 long ramp; up to 80°).">Pocket ramp angle° (0 = plunge)<input type="number" step="5" min="0" max="80" data-path="pocketRampAngle" /></label>
+          <label class="field" title="In a dado, the bit stays down and feeds back over floor it already cleared for moves up to this long; longer moves lift and rapid instead">Dado stay-down travel<input type="number" step="0.5" min="0" data-path="stayDownMax" /></label>
+          <label class="field">Spin-up sec<input type="number" step="1" data-path="spinupSeconds" /></label>
+          <label class="field">Z zero
+            <select data-path="zZero"><option value="top">Material top</option><option value="table">Spoilboard</option></select>
+          </label>
+          <label class="field">Direction
+            <select data-path="climb"><option value="false">Conventional</option><option value="true">Climb</option></select>
+          </label>
+        </div>
+        <div class="grid2">
+          <label class="field span2" title="What keeps parts in place while the last pass cuts them free">Hold parts with
+            <select data-path="holdDown">
+              <option value="skin">Onion skin (needs vacuum)</option>
+              <option value="tabs">Tabs</option>
+              <option value="both">Tabs + onion skin</option>
+              <option value="none">Nothing (cut right through)</option>
+            </select>
+          </label>
+          <label class="field" id="skinF" title="Material left at the bottom of every cut until a final light pass around each part">Onion skin<input type="number" step="0.005" data-path="onionSkin" /></label>
+          <label class="check span2" title="Five screws: as close as they can get to the four corners of the area the parts take up, and one at its centre (the nest opens up a spot there), all clear of every cut. The first bit drills the holes, the machine parks and stops; drive the screws, then continue the job."><input type="checkbox" data-path="screws.on" /> Screw hold-downs (drill 5, stop, then cut)</label>
+          <div id="screwF" class="grid3 span2">
+            <label class="field" title="Screw head (or washer) diameter">Head dia<input type="number" step="0.0625" data-path="screws.head" /></label>
+            <label class="field" title="Room from the edge of the head to the nearest cut">Clearance<input type="number" step="0.0625" data-path="screws.clear" /></label>
+            <label class="field" title="How deep the first bit drills the screw holes; 0 = right through the sheet">Hole depth<input type="number" step="0.05" data-path="screws.depth" /></label>
+          </div>
+        </div>
+        <div id="tabOpts" class="grid2">
+          <label class="field">Tab length<input type="number" step="0.0625" data-path="tabs.length" /></label>
+          <label class="field">Tab thickness<input type="number" step="0.0625" data-path="tabs.thickness" title="Material left at the bottom" /></label>
+          <label class="field" title="The bit ramps up onto each tab and back down over this distance instead of stopping and going straight up, so it leaves no mark on the part edge. 0 = straight up and down">Tab ramp length<input type="number" step="0.0625" min="0" data-path="tabs.ramp" /></label>
+          <label class="field">Spacing (approx)<input type="number" step="1" data-path="tabs.spacing" /></label>
+          <label class="field">Min per part<input type="number" step="1" data-path="tabs.min" /></label>
+          <label class="field span2">Only parts under (sq in, 0 = all)<input type="number" step="12" data-path="tabs.maxArea" /></label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Machine</h2>
+        <label class="field">Post
+          <select data-path="post">
+            <option value="fluidnc">FluidNC (.nc)</option>
+            <option value="linuxcnc">LinuxCNC (.ngc)</option>
+            <option value="sbp">ShopBot (.sbp)</option>
+          </select>
+        </label>
+        <label class="check" id="arcsF" title="Curves (rounded corners, cups, reliefs, the pocket spiral) go out as G2/G3 arcs instead of many short lines: smaller files and smoother motion. ShopBot files use CG arcs."><input type="checkbox" data-path="arcs" /> Arcs (G2/G3 / CG)</label>
+        <div id="sbpOpts" class="grid2">
+          <label class="field">Spindle on<input data-path="sbpSpindleOn" /></label>
+          <label class="field">Spindle off<input data-path="sbpSpindleOff" /></label>
+          <label class="field" title="Bit changes go out as &amp;Tool = n then C9 (ShopBot's tool-change routine). Tool numbers come from the tool library and must be 1 to this number.">Highest tool #<input type="number" step="1" min="1" data-path="sbpMaxTool" /></label>
+          <label class="check span2"><input type="checkbox" data-path="sbpSetRpm" /> Send TR (VFD RPM)</label>
+        </div>
+        <h3 class="small" title="From your controller's settings (FluidNC: max_rate_mm_per_min and acceleration_mm_per_sec2 per axis; divide mm by 25.4)">Machine profile</h3>
+        <div class="grid2">
+          <label class="field">Max X/Y ipm<input type="number" step="10" min="1" data-path="machine.maxXY" /></label>
+          <label class="field">Max Z ipm<input type="number" step="5" min="1" data-path="machine.maxZ" /></label>
+          <label class="field">Accel X/Y in/s²<input type="number" step="1" min="0.1" data-path="machine.accelXY" /></label>
+          <label class="field">Accel Z in/s²<input type="number" step="1" min="0.1" data-path="machine.accelZ" /></label>
+          <label class="field span2" title="Stop, swap the bit, re-zero, start">Bit change (seconds)<input type="number" step="10" min="0" data-path="machine.toolChangeSec" /></label>
+        </div>
+        <div class="grid2">
+          <label class="field">Park X<input type="number" step="1" data-path="park.x" /></label>
+          <label class="field">Park Y<input type="number" step="1" data-path="park.y" /></label>
+        </div>
+        <button id="resetSettings" class="link">Reset settings to defaults</button>
+      </section>
+    </aside>
+
+    <section class="main">
+      <section class="card">
+        <div class="card-head">
+          <h2>Parts</h2>
+          <span id="partsSummary" class="muted small"></span>
+          <span class="spacer"></span>
+          <button id="nestBtn" class="primary" disabled>Nest &amp; toolpath</button>
+        </div>
+        <div id="messages"></div>
+        <div id="partsTable" class="table-wrap"><p class="muted empty">Paste a Part Studio URL or load the sample.</p></div>
+      </section>
+
+      <section class="card" id="cutListCard" hidden>
+        <div class="card-head">
+          <h2>Cut list</h2>
+          <span id="cutListSummary" class="muted small"></span>
+          <span class="spacer"></span>
+          <button id="cutListCsv">Download CSV</button>
+          <button id="cutListPrint">Print</button>
+        </div>
+        <p class="muted small">Parts not cut on the CNC (face frame stiles and rails, anything tagged cnc: false). Identical members are combined.</p>
+        <div id="cutListTable" class="table-wrap"></div>
+      </section>
+
+      <section class="card" id="libraryCard" hidden>
+        <div class="card-head">
+          <h2>Tool library</h2>
+          <span id="librarySaved" class="muted small"></span>
+          <span class="spacer"></span>
+          <button id="addTool">Add tool</button>
+          <button id="closeLibrary">Done</button>
+        </div>
+        <p class="muted small">Defaults for every bit. Changes save automatically and apply to every job that uses the tool; saved jobs keep a copy of the tools they were made with.</p>
+        <div id="libraryList" class="tool-grid"></div>
+      </section>
+
+      <section class="card" id="resultsCard" hidden>
+        <div class="card-head">
+          <h2>Sheets</h2>
+          <span id="resultsSummary" class="muted small"></span>
+          <span class="spacer"></span>
+          <button id="labelsBtn" title="Zebra labels: one strip per sheet">Labels…</button>
+          <button id="printLayouts" title="Print every sheet's layout and parts list on an ordinary printer, one page per sheet">Print layouts</button>
+          <button id="markCut" title="Uses up the remnants this job was nested on and keeps its offcuts as new remnants">Mark job as cut</button>
+          <button id="searchAgain" title="Search again from a different starting point; the layout only changes if the new one is better">Search again</button>
+          <label class="check inline"><input type="checkbox" id="showPaths" checked /> Toolpaths</label>
+          <label class="check inline" title="Carve the toolpath into the sheet and check it against the model: every floor cut to depth, nothing deeper than the model, outlines cut through (with tabs). Yellow = left uncut, red = too deep, pink = not cut through."><input type="checkbox" id="showSim" /> Simulate cut</label>
+          <button id="downloadAll">Download all</button>
+        </div>
+        <div id="sheetTabs" class="tabs"></div>
+        <div id="labelsPanel" class="labels-panel" hidden>
+          <div class="labels-opts">
+            <label class="field">Label W (in)<input type="number" step="0.25" min="1" data-path="labels.w" /></label>
+            <label class="field">Label H (in)<input type="number" step="0.25" min="0.75" data-path="labels.h" /></label>
+            <label class="field">Printer dpi
+              <select data-path="labels.dpi"><option value="203">203</option><option value="300">300</option><option value="600">600</option></select>
+            </label>
+            <label class="field">Send to
+              <select data-path="labels.mode">
+                <option value="download">Download .zpl file</option>
+                <option value="network">Network printer (IP)</option>
+                <option value="share">Windows shared printer</option>
+              </select>
+            </label>
+            <label class="field" id="lblHostF">Printer IP[:port]<input data-path="labels.host" placeholder="192.168.1.50" /></label>
+            <label class="field" id="lblShareF">Share name<input data-path="labels.share" placeholder="ZD420" /></label>
+            <label class="check inline"><input type="checkbox" data-path="labels.header" /> Sheet label first</label>
+            <label class="check inline"><input type="checkbox" data-path="labels.offcuts" /> Offcut labels</label>
+          </div>
+          <div class="row">
+            <button id="lblSheet" class="primary">Print this sheet</button>
+            <button id="lblAll">Print all sheets</button>
+            <span id="lblNote" class="muted small"></span>
+          </div>
+          <div id="labelStrip" class="label-strip"></div>
+        </div>
+        <div id="sheetView"></div>
+      </section>
+    </section>
+  </main>
+
+  <script src="lib/vendor/clipper.js"></script>
+  <script type="module" src="app.js"></script>
+  <dialog id="keysDlg">
+    <form method="dialog" class="keys-form">
+      <h3>Onshape API keys</h3>
+      <p class="small muted">Create a key pair at dev-portal.onshape.com → API keys (read access is enough). They are saved on this computer only, with the app's data.</p>
+      <p class="small" id="keysNow"></p>
+      <label class="field">Access key<input id="keyAccess" autocomplete="off" spellcheck="false" /></label>
+      <label class="field">Secret key<input id="keySecret" type="password" autocomplete="off" spellcheck="false" /></label>
+      <p class="small error" id="keysErr"></p>
+      <div class="row">
+        <button type="button" id="keysSave" class="primary">Save keys</button>
+        <button type="button" id="keysClear" class="link">Remove saved keys</button>
+        <button value="cancel" class="link">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

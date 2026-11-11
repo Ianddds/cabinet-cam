@@ -1,0 +1,8 @@
+node_modules/
+.env
+data/
+test/out/
+dist/
+*.zip
+# cabinet FeatureScript stays private (kept in the Claude project and Onshape)
+onshape/
