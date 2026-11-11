@@ -1,7 +1,7 @@
 import { DEFAULT_SETTINGS, groupParts, mergeSettings, holdDownOf, usesSkin, usesTabs } from './lib/settings.js';
 import { carve, check, shade } from './lib/sim.js';
 import { nestParts, applySolution, nestKey, placedGeometry, partExits, rectMinus } from './lib/nest.js';
-import { sheetToolpaths, screwR, rectsOutline } from './lib/toolpath.js';
+import { sheetToolpaths, screwR, rectsOutline, screwCheck } from './lib/toolpath.js';
 import { post, postWithWarnings, fileExtension, SBP_MAX_TOOL, toolNumberOk } from './lib/post.js';
 import { parsePP } from './lib/vpp.js';
 import { DEFAULT_LIBRARY, TOOL_FIELDS, newTool, resolveTools } from './lib/tools.js';
@@ -25,6 +25,7 @@ function rememberSettings() {
 let job = { id: null, name: '', source: null, parts: [], settings: loadSavedSettings() };
 let results = []; // [{ group, sheets: [{ sheet, tp, file, text }] , unplaced }]
 let activeSheet = 0;
+let screwEdit = false;  // sheet view: click to add a hold-down screw, drag to move, right-click to remove
 let library = structuredClone(DEFAULT_LIBRARY);
 let remnants = []; // shared inventory from the server
 
@@ -95,10 +96,10 @@ function setParts(data) {
   delete data.raw;
   const sameSource = job.source?.url && data.source?.url === job.source.url;
   job.parts = sameSource ? carryOverrides(job.parts, data.parts) : data.parts;
-  if (!sameSource) { job.nests = {}; }
+  if (!sameSource) { job.nests = {}; job.manualScrews = {}; }
   if (job.cut) {
     // a cut job is a record of what was cut: new parts start a new job
-    job = { ...job, id: null, cut: null, nests: {}, name: job.name ? `${job.name} (2)` : '' };
+    job = { ...job, id: null, cut: null, nests: {}, manualScrews: {}, name: job.name ? `${job.name} (2)` : '' };
     $('#jobName').value = job.name;
   }
   job.source = data.source;
@@ -482,15 +483,20 @@ function runNest() {
     if (!nest) { nest = nestParts(g.parts, nestOpts); quick = true; }
     const cfg = { ...s, ...tl, thickness: g.thickness, ...(postPP(s) ? { pp: postPP(s) } : {}) };
     const mat = g.material.replace(/[^\w-]+/g, '_');
+    const mkey = manualKey(key, kept);
     const sheets = nest.sheets.map((sheet, i) => {
+      applyManualScrews(sheet, job.manualScrews?.[mkey]?.[i]);
       const tp = sheetToolpaths(sheet, cfg);
       const rno = sheet.remnant && (remnants.find((r) => r.id === sheet.remnant.id)?.no ?? nestOpts.remnants.find((r) => r.id === sheet.remnant.id)?.no ?? kept?.stock?.find((r) => r.id === sheet.remnant.id)?.no);
       sheet.remnant && (sheet.remnant.no = rno);
       const what = sheet.remnant ? `remnant R${rno ?? '?'}` : `sheet ${i + 1} of ${nest.sheets.length}`;
       const title = `${job.name || 'Job'} | ${g.key} | ${what}`;
-      if (s.screws?.on && sheet.screwsMissing) stockNotes.push(`${g.key} ${what}: room for only ${sheet.screws.length} of 5 hold-down screws — hold the rest of the sheet another way`);
-      if (s.screws?.on && sheet.screwsInKeeper) stockNotes.push(`${g.key} ${what}: ${sheet.screwsInKeeper} hold-down screw${sheet.screwsInKeeper === 1 ? '' : 's'} had to go in the offcut being kept (no scrap in that part of the sheet) — it will have the hole${sheet.screwsInKeeper === 1 ? '' : 's'}`);
-      return { sheet, tp, cfg, title, file: `${stamp}_${mat}_${g.thickness.toFixed(3)}_${sheet.remnant ? 'R' + (rno ?? 'x') : 'S' + (i + 1)}.${ext}`, text: null, group: g };
+      const chk = screwsShown(cfg, sheet) ? screwCheck(sheet, tp.moves, cfg) : [];
+      const bad = chk.filter((c) => !c.ok).length;
+      if (bad) stockNotes.push(`${g.key} ${what}: ${bad} hold-down screw${bad === 1 ? ' is' : 's are'} in a bad spot (red) — move ${bad === 1 ? 'it' : 'them'} before cutting`);
+      if (s.screws?.on && !sheet.screwsManual && sheet.screwsMissing) stockNotes.push(`${g.key} ${what}: room for only ${sheet.screws.length} of 5 hold-down screws — hold the rest of the sheet another way`);
+      if (s.screws?.on && !sheet.screwsManual && sheet.screwsInKeeper) stockNotes.push(`${g.key} ${what}: ${sheet.screwsInKeeper} hold-down screw${sheet.screwsInKeeper === 1 ? '' : 's'} had to go in the offcut being kept (no scrap in that part of the sheet) — it will have the hole${sheet.screwsInKeeper === 1 ? '' : 's'}`);
+      return { sheet, tp, cfg, title, mkey, idx: i, screwChk: chk, file: `${stamp}_${mat}_${g.thickness.toFixed(3)}_${sheet.remnant ? 'R' + (rno ?? 'x') : 'S' + (i + 1)}.${ext}`, text: null, group: g };
     });
     results.push({ group: g, sheets, unplaced: nest.unplaced, lowerBound: nest.stats?.lowerBound });
   }
@@ -503,6 +509,45 @@ function runNest() {
     { error: true, text: unplaced.length ? 'Not placed:' : '', items: unplaced },
     { text: warnings.length ? 'Check before cutting:' : '', items: warnings },
   ]);
+  renderResults();
+}
+
+// ---------- hand-placed hold-down screws ----------
+// Kept per sheet in job.manualScrews[nest key | layout][sheet index], so a new
+// layout (search again, different parts or settings) starts from automatic again.
+function strHash(t) {
+  let h = 2166136261;
+  for (let i = 0; i < t.length; i++) h = Math.imul(h ^ t.charCodeAt(i), 16777619);
+  return (h >>> 0).toString(36);
+}
+const manualKey = (key, kept) => `${key}|${kept ? strHash(JSON.stringify(kept.solution)) : 'quick'}`;
+const screwsShown = (cfg, sheet) => !!(cfg.screws?.on || sheet.screwsManual);
+
+function applyManualScrews(sheet, list) {
+  if (!sheet.autoScrews) sheet.autoScrews = { screws: sheet.screws || [], missing: sheet.screwsMissing || 0, inKeeper: sheet.screwsInKeeper || 0 };
+  if (list) {
+    sheet.screws = list.map((q) => ({ x: q.x, y: q.y }));
+    sheet.screwsManual = true;
+  } else {
+    sheet.screws = sheet.autoScrews.screws;
+    sheet.screwsMissing = sheet.autoScrews.missing;
+    sheet.screwsInKeeper = sheet.autoScrews.inKeeper;
+    sheet.screwsManual = false;
+  }
+}
+
+// new screw list for one sheet (null = back to automatic): redo its toolpath
+function setSheetScrews(item, list) {
+  job.manualScrews = job.manualScrews || {};
+  const m = (job.manualScrews[item.mkey] = job.manualScrews[item.mkey] || {});
+  if (list) m[item.idx] = list.map((q) => ({ x: +q.x.toFixed(3), y: +q.y.toFixed(3) }));
+  else delete m[item.idx];
+  if (!Object.keys(m).length) delete job.manualScrews[item.mkey];
+  applyManualScrews(item.sheet, list);
+  item.tp = sheetToolpaths(item.sheet, item.cfg);
+  item.screwChk = screwsShown(item.cfg, item.sheet) ? screwCheck(item.sheet, item.tp.moves, item.cfg) : [];
+  item.text = null;
+  item.sim = null;
   renderResults();
 }
 
@@ -563,7 +608,7 @@ function simulateSheet(item) {
   const sim = carve(item.sheet, item.tp.moves, { res, dia: item.cfg.tool.dia });
   const dado = item.cfg.dadoSameTool || !item.cfg.dadoTool ? item.cfg.tool : item.cfg.dadoTool;
   const firstBit = item.tp.moves.find((m) => m.toolchange)?.tool;
-  const scr = item.cfg.screws?.on ? { screws: item.sheet.screws || [], screwR: screwR(item.cfg.screws), screwHoleR: (firstBit?.dia || 0) / 2 } : {};
+  const scr = screwsShown(item.cfg, item.sheet) ? { screws: item.sheet.screws || [], screwR: screwR(item.cfg.screws), screwHoleR: (firstBit?.dia || 0) / 2 } : {};
   const result = check(item.sheet, sim, { dia: dado.dia, profileDia: item.cfg.tool.dia, thickness: item.cfg.thickness, holdDown: holdDownOf(item.cfg), ...scr });
   const im = shade(sim, { thickness: item.cfg.thickness, cells: result.cells });
   const c = document.createElement('canvas');
@@ -597,7 +642,7 @@ function renderSheet(item) {
   const pad = 1.5;
   const H = s.sheetH;
   const fy = (y) => H - y; // machine Y up
-  let svg = `<svg class="sheet-svg" viewBox="${-pad} ${-pad} ${s.sheetW + 2 * pad} ${H + 2 * pad}" xmlns="http://www.w3.org/2000/svg">`;
+  let svg = `<svg class="sheet-svg${screwEdit ? ' screw-edit' : ''}" viewBox="${-pad} ${-pad} ${s.sheetW + 2 * pad} ${H + 2 * pad}" xmlns="http://www.w3.org/2000/svg">`;
   svg += `<rect class="sheet" x="0" y="0" width="${s.sheetW}" height="${H}"/>`;
   svg += `<rect class="trim" x="${s.trim}" y="${s.trim}" width="${s.sheetW - 2 * s.trim}" height="${H - 2 * s.trim}"/>`;
   // an L / T remnant: the missing part of its bounding box
@@ -644,11 +689,12 @@ function renderSheet(item) {
       svg += `<circle class="drillpt" cx="${m.x.toFixed(3)}" cy="${fy(m.y).toFixed(3)}" r="0.22"/>`;
     }
   }
-  // screw hold-downs: the hole, and the ring no cut comes inside
-  if (item.cfg.screws?.on) for (const q of sh.screws || []) {
-    svg += `<circle class="screwzone" cx="${q.x.toFixed(3)}" cy="${fy(q.y).toFixed(3)}" r="${screwR(item.cfg.screws).toFixed(3)}"><title>Hold-down screw (drilled first, then the machine stops)</title></circle>`;
-    svg += `<circle class="screwpt" cx="${q.x.toFixed(3)}" cy="${fy(q.y).toFixed(3)}" r="0.1"/>`;
-  }
+  // screw hold-downs: the hole, and the ring no cut comes inside (red = bad spot)
+  if (screwsShown(item.cfg, sh) || screwEdit) (sh.screws || []).forEach((q, k) => {
+    const c = item.screwChk?.[k];
+    const tip = c && !c.ok ? `Bad spot: ${c.why}` : `Hold-down screw${sh.screwsManual ? ' (placed by hand)' : ''}${c?.inKeeper ? ', in the offcut being kept' : ''} — drilled first, then the machine stops`;
+    svg += `<g class="screw${c && !c.ok ? ' bad' : ''}" data-k="${k}" transform="translate(${q.x.toFixed(3)} ${fy(q.y).toFixed(3)})"><circle class="screwzone" r="${screwR(item.cfg.screws).toFixed(3)}"><title>${tip}${screwEdit ? ' · drag to move, right-click to remove' : ''}</title></circle><circle class="screwpt" r="0.1"/>${screwEdit ? '<circle class="screwhit" r="1.2"/>' : ''}</g>`;
+  });
   // offcuts worth keeping (on the zero corner where possible); numbered once the job is marked cut
   (sh.offcuts || []).forEach((oc, k) => {
     const no = job.cut?.added?.find((a) => a.sheetFile === item.file && a.k === k)?.no;
@@ -674,15 +720,74 @@ function renderSheet(item) {
       <span class="muted">${item.sheet.placements.length} parts · ${(item.sheet.yield * 100).toFixed(0)}% yield · ${st.cutLength.toFixed(0)}" of cut · ${st.rapidLength.toFixed(0)}" of rapids · ~${st.estMinutes.toFixed(0)} min</span>
       <span class="spacer"></span>
       <span class="legend"><span><i style="background:var(--path)"></i>cut</span><span><i style="background:var(--rapid)"></i>rapid</span><span><i style="background:var(--pocket)"></i>dado</span><span><i style="background:var(--drill)"></i>drill</span>${usesTabs(item.cfg) ? '<span><i style="background:var(--tab)"></i>tab</span>' : ''}</span>
+      <button id="screwEditBtn" class="${screwEdit ? 'active' : ''}" title="Place hold-down screws by hand on this sheet: click to add, drag to move, right-click to remove">${screwEdit ? 'Done placing screws' : 'Place screws'}</button>
       <button id="printSheet">Print layout</button>
       <button id="dlSheet" class="primary">Download ${esc(item.file)}</button>
     </div>${svg}
     ${simNote}
+    ${screwEdit ? `<p class="small screw-help">Placing screws: click an empty spot to add one, drag to move, right-click to remove. Red = a cut or part is too close. ${sh.screws?.length || 0} on this sheet${sh.screwsManual ? ' (placed by hand)' : ''}. <button id="screwAuto" ${sh.screwsManual ? '' : 'disabled'}>Back to automatic</button> <button id="screwClear" ${sh.screws?.length ? '' : 'disabled'}>Remove all</button></p>` : ''}
     ${sh.remnant ? `<p class="small"><strong>Remnant R${sh.remnant.no ?? '?'}</strong> (${fraction(sh.w)} × ${fraction(sh.h)}): put its zero corner (the one that was the sheet's zero corner) at the origin, grain along X.</p>` : ''}
     <p class="muted small">Origin (red dot) is front-left of the ${sh.remnant ? 'remnant' : 'sheet'}, X along the ${s.sheetW}" side. Z0 = ${item.cfg.zZero === 'table' ? 'spoilboard' : 'material top'}. Air-cut new posts before running material.</p>`;
   $('#dlSheet').onclick = () => download(item.file, textFor(item));
   $('#printSheet').onclick = () => printLayouts([item]);
+  $('#screwEditBtn').onclick = () => { screwEdit = !screwEdit; renderResults(); };
+  if (screwEdit) {
+    $('#screwAuto').onclick = () => setSheetScrews(item, null);
+    $('#screwClear').onclick = () => setSheetScrews(item, []);
+    wireScrewEdit(item, $('#sheetView svg'), fy);
+  }
   renderLabels();
+}
+
+// Click to add a screw, drag to move one, right-click to remove one. While
+// dragging the ring turns red against the current toolpath; dropping redoes
+// the sheet's toolpath and checks again.
+function wireScrewEdit(item, svgEl, fy) {
+  const sh = item.sheet;
+  const at = (e) => {
+    const pt = svgEl.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const p = pt.matrixTransform(svgEl.getScreenCTM().inverse());
+    return { x: Math.round(p.x * 100) / 100, y: Math.round(fy(p.y) * 100) / 100 };
+  };
+  const list = () => (sh.screws || []).map((q) => ({ x: q.x, y: q.y }));
+  let drag = null;
+  svgEl.addEventListener('contextmenu', (e) => {
+    const g = e.target.closest('g.screw');
+    e.preventDefault();
+    if (!g) return;
+    const l = list();
+    l.splice(+g.dataset.k, 1);
+    setSheetScrews(item, l);
+  });
+  svgEl.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const g = e.target.closest('g.screw');
+    const l = list();
+    let k;
+    if (g) k = +g.dataset.k;
+    else { l.push(at(e)); setSheetScrews(item, l); return; }
+    drag = { k, l, g, moved: false };
+    svgEl.setPointerCapture(e.pointerId);
+  });
+  svgEl.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const p = at(e);
+    drag.l[drag.k] = p;
+    drag.moved = true;
+    drag.g.setAttribute('transform', `translate(${p.x} ${fy(p.y)})`);
+    const c = screwCheck({ ...sh, screws: [p] }, item.tp.moves, item.cfg)[0];
+    drag.g.classList.toggle('bad', !c.ok);
+  });
+  const end = () => {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    if (d.moved) setSheetScrews(item, d.l);
+  };
+  svgEl.addEventListener('pointerup', end);
+  svgEl.addEventListener('pointercancel', end);
 }
 
 // ---------- labels ----------

@@ -129,6 +129,15 @@ tr.off td { opacity: 0.45; }
 .sheet-svg .drillpt { fill: none; stroke: var(--drill); stroke-width: 0.08; }
 .sheet-svg .screwzone { fill: rgba(0, 120, 255, 0.12); stroke: #0078ff; stroke-width: 0.06; stroke-dasharray: 0.2 0.15; }
 .sheet-svg .screwpt { fill: #0078ff; }
+.sheet-svg .screw.bad .screwzone { fill: rgba(220, 30, 30, 0.18); stroke: #d22; }
+.sheet-svg .screw.bad .screwpt { fill: #d22; }
+.sheet-svg.screw-edit { cursor: crosshair; touch-action: none; }
+.sheet-svg.screw-edit .screw { cursor: grab; }
+.sheet-svg .screwhit { fill: transparent; stroke: #0078ff; stroke-width: 0.05; stroke-opacity: 0.5; }
+.sheet-svg .screw.bad .screwhit { stroke: #d22; }
+.sheet-svg.screw-edit .screw .screwzone { stroke-width: 0.1; }
+.screw-help { background: rgba(0, 120, 255, 0.08); padding: 6px 8px; border-radius: 4px; }
+button.active { outline: 2px solid #0078ff; }
 .sheet-svg .notstock { fill: #d4d4d4; stroke: none; }
 .sheet-svg .simbad.screw { stroke: #0078ff; }
 .sheet-svg .tabseg { fill: none; stroke: var(--tab); stroke-width: 0.35; stroke-linecap: butt; }

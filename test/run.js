@@ -8,7 +8,7 @@ import { inRegion, difference, offset, union, area } from '../public/lib/clip.js
 import { normalizeAll } from '../lib/parts.js';
 import { decode } from '../lib/onshape.js';
 import { nestParts, placedGeometry, applySolution, nestKey } from '../public/lib/nest.js';
-import { sheetToolpaths, placeTabs, legsOf, splitLobes, legsFromWalls, offcutCutLines, screwR } from '../public/lib/toolpath.js';
+import { sheetToolpaths, placeTabs, legsOf, splitLobes, legsFromWalls, offcutCutLines, screwR, screwCheck } from '../public/lib/toolpath.js';
 import { postGcode, postShopBot, post as postAny, fitArcs } from '../public/lib/post.js';
 import { parsePP } from '../public/lib/vpp.js';
 import { carve, check as simCheck } from '../public/lib/sim.js';
@@ -999,6 +999,46 @@ for (const g of groupParts(parts)) {
   console.log(`screw hold-downs: ${sheets} sheets, ${spots} spots, ${missing} without room, ${thinN} in thin strips, ${keeperN} in a keeper offcut, centre screw within ${centreWorst.toFixed(1)}\" of the parts' centre, ${extraSheets} extra sheet(s), closest cut ${worst.toFixed(3)}" from a screw centre`);
   check(worst >= screwR(DEFAULT_SETTINGS.screws) - 0.01, `no cut inside a screw's clearance (closest ${worst.toFixed(3)}")`);
   check(faults.planted, 'simulation catches a screw spot that gets cut');
+}
+
+// --- hand-placed screws: drilled even with automatic screws off, cuts keep
+// clear of them, and bad spots (on a part, on a cut line, off the sheet) are caught ---
+{
+  const many = normalizeAll(sampleKitchen()).parts;
+  many.forEach((p) => { p.include = p.cnc !== false; });
+  const s = structuredClone(DEFAULT_SETTINGS);
+  s.screws = { ...s.screws, on: false };
+  const tl = resolveTools(s, DEFAULT_LIBRARY, []);
+  const g = groupParts(many.filter((p) => p.include))[0];
+  const sh = nestParts(g.parts, { ...s.sheet, respectGrain: true }).sheets[0];
+  const cfg = { ...s, ...tl, thickness: g.thickness };
+  const before = sheetToolpaths(sh, cfg);
+  check(!before.moves.some((m) => m.op === 'screw' || m.pause), 'no screws: nothing drilled, no stop');
+  // a clear spot: on the bare sheet past the parts, else the trim corner
+  const R = screwR(s.screws);
+  const geoms = sh.placements.map((pl) => placedGeometry(pl));
+  // a clear spot: first grid point the check passes against the sheet's toolpath
+  let good = null;
+  for (let x = 1; x < sh.w && !good; x += 0.5) for (let y = 1; y < sh.h && !good; y += 0.5) {
+    if (screwCheck({ ...sh, screws: [{ x, y }] }, before.moves, cfg)[0].ok) good = { x, y };
+  }
+  check(!!good, 'a clear spot for a screw is found');
+  const pg = geoms[0];
+  const onPart = { x: (pg.box.x0 + pg.box.x1) / 2, y: (pg.box.y0 + pg.box.y1) / 2 };
+  const onEdge = { x: pg.box.x1 + 0.1, y: (pg.box.y0 + pg.box.y1) / 2 };
+  const offSheet = { x: 0.05, y: 10 };
+  const man = { ...sh, screws: [good, onPart, onEdge, offSheet], screwsManual: true };
+  const tp = sheetToolpaths(man, cfg);
+  const drilled = tp.moves.filter((m) => m.op === 'screw' && m.plunge).length;
+  check(drilled >= 4 && tp.moves.filter((m) => m.pause).length === 1, `hand-placed screws drilled with automatic screws off, then one stop (${drilled})`);
+  const chk = screwCheck(man, tp.moves, cfg);
+  check(chk[0].ok, `a clear hand-placed spot still passes with its toolpath redone (${chk[0].why || 'ok'} at ${good.x}, ${good.y})`);
+  check(!chk[1].ok && /inside a part/.test(chk[1].why), 'a screw on a part is caught');
+  check(!chk[2].ok && /cut/.test(chk[2].why), 'a screw on a cut line is caught');
+  check(!chk[3].ok && /edge/.test(chk[3].why), 'a screw off the edge is caught');
+  const none = sheetToolpaths({ ...sh, screws: [], screwsManual: true }, cfg);
+  check(!none.moves.some((m) => m.pause), 'all hand-placed screws removed: no stop');
+  console.log(`hand-placed screws: ${chk.map((c) => (c.ok ? 'ok' : c.why)).join(' · ')}`);
 }
 
 // --- post files (.pp, Vectric format): the starter posts and a Vectric-style

@@ -3,7 +3,7 @@
 // Z is relative to the material top (0 = top, negative = into the material);
 // the post-processor shifts it if the machine is zeroed on the table.
 import { placedGeometry } from './nest.js';
-import { ensureCCW, ensureCW, bbox, signedArea } from './geometry.js';
+import { ensureCCW, ensureCW, bbox, signedArea, pointInPolygon } from './geometry.js';
 import { offset, union, intersect, difference, inRegion, area } from './clip.js';
 import { usesSkin, usesTabs } from './settings.js';
 import { machineTime } from './machine.js';
@@ -1423,6 +1423,37 @@ function shapeCutLines(rects, W, H, r) {
 
 // clearance radius kept around a screw centre: half the head plus the clearance
 export const screwR = (S) => (S.head || 0.375) / 2 + (S.clear ?? 0.125);
+
+// Check hold-down screw spots against the sheet and its toolpath (hand-placed
+// ones above all). Per screw: { ok, why, inKeeper }. A spot is bad when it's
+// off the stock, inside a part, or any cut (other than its own hole) brings
+// the cutter edge inside the screw's clearance radius.
+export function screwCheck(sheet, moves, cfg) {
+  const S = cfg.screws || {};
+  const R = screwR(S), hr = (S.head || 0.375) / 2;
+  const W = sheet.w ?? cfg.sheet?.sheetW ?? 96, H = sheet.h ?? cfg.sheet?.sheetH ?? 48;
+  const stock = sheet.remnant?.rects?.length > 1 ? sheet.remnant.rects : [{ x: 0, y: 0, w: W, h: H }];
+  const outlines = sheet.placements.map((pl) => placedGeometry(pl).outline);
+  const keepers = (sheet.offcuts || []).flatMap((oc) => (oc.rects?.length > 1 ? oc.rects : [oc]));
+  // cutting segments with the radius of the bit making them
+  const segs = [];
+  let r = 0, px = null, py = null, pz = 1;
+  for (const m of moves) {
+    if (m.toolchange) { r = (m.tool?.dia || 0) / 2; continue; }
+    if (m.x == null) continue;
+    const z = m.z ?? pz;
+    if (px != null && m.g === 1 && m.op !== 'screw' && (z < -1e-4 || pz < -1e-4)) segs.push([px, py, m.x, m.y, r]);
+    px = m.x; py = m.y; pz = z;
+  }
+  return (sheet.screws || []).map((q) => {
+    const p = [q.x, q.y];
+    if (!stock.some((t) => q.x >= t.x + hr - 1e-6 && q.x <= t.x + t.w - hr + 1e-6 && q.y >= t.y + hr - 1e-6 && q.y <= t.y + t.h - hr + 1e-6)) return { ok: false, why: 'off the edge of the stock' };
+    if (outlines.some((o) => pointInPolygon(p, o))) return { ok: false, why: 'inside a part' };
+    for (const [x0, y0, x1, y1, rr] of segs) if (distToSeg(p, [x0, y0], [x1, y1]) < R + rr - 1e-3) return { ok: false, why: 'a cut comes inside its clearance' };
+    return { ok: true, inKeeper: keepers.some((k) => q.x > k.x && q.x < k.x + k.w && q.y > k.y && q.y < k.y + k.h) };
+  });
+}
+
 function circlePoly(cx, cy, r, n) {
   const out = [];
   for (let k = 0; k < n; k++) { const a = (2 * Math.PI * k) / n; out.push([cx + (r / Math.cos(Math.PI / n)) * Math.cos(a), cy + (r / Math.cos(Math.PI / n)) * Math.sin(a)]); }
@@ -1486,7 +1517,8 @@ export function sheetToolpaths(sheet, cfg) {
   // Screw hold-downs: the first bit drills the screw holes before anything
   // else, goes to the park position and stops; the operator drives the screws
   // and continues. The nest left every spot clear of all cuts.
-  const SCR = cfg.screws?.on && sheet.screws?.length ? cfg.screws : null;
+  // (hand-placed screws are drilled whether or not automatic screws are on)
+  const SCR = (cfg.screws?.on || sheet.screwsManual) && sheet.screws?.length ? { head: 0.375, clear: 0.125, depth: 0.25, ...cfg.screws } : null;
   let screwsDone = !SCR;
   const drillScrews = (t) => {
     const depth = SCR.depth > 0 ? SCR.depth : T + (cfg.overcut || 0);

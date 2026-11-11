@@ -177,6 +177,10 @@ Cutting → **Screw hold-downs** (for a table without vacuum). Every sheet gets 
 
 On the machine: the first bit drills the 5 holes (**Hole depth**, default 0.25: with a bit as wide as the head that's a counterbore the head sits down in, below anything that moves over the sheet; 0 = right through, and the run warns if the heads would pull through), the spindle stops, the machine parks (the Park position, or X0 Y0) and the file stops (`M5` + `M0`, ShopBot `C7` + `PAUSE`) with the message *Drive a screw in each of the 5 holes…*. Drive the screws, continue, and the job runs on (spindle back on with its spin-up). The time estimate counts the stop like a bit change. The preview draws each screw and its clear ring in blue; **Simulate cut** flags any cut inside a ring (blue), and `npm test` checks every sample sheet both nest ways and plants a fault to make sure it's caught. Remnants get screws the same way (no held centre square, so a remnant isn't kept from fitting a part).
 
+### Placing screws by hand
+
+On any sheet, **Place screws** (above the layout) lets you put the hold-down screws where you want them: **click** an empty spot to add one, **drag** one to move it, **right-click** one to remove it. Each ring is the screw's clearance; it turns **red** when the spot is no good (on a part, off the edge of the stock, or a cut comes inside the clearance) and the job warns about it. When you drop a screw the sheet's toolpath is redone, so cuts and dado run-outs keep clear of it and the screw holes are drilled first, followed by the stop. Hand-placed screws are drilled even when automatic **Screw hold-downs** is off, so you can screw down just the sheets that need it. **Back to automatic** returns that sheet to the nest's screws; **Remove all** means no screws (and no stop) on that sheet. Hand-placed screws are saved with the job, per sheet, and are dropped when the layout changes (Search again, different parts or settings).
+
 ## Holes
 
 Round holes are found from the geometry (no tagging needed) and matched against the **Drills** list in settings plus the loaded router bits (within 0.006"):
