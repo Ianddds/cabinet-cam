@@ -130,12 +130,21 @@
       <section class="card">
         <h2>Machine</h2>
         <label class="field">Post
-          <select data-path="post">
-            <option value="fluidnc">FluidNC (.nc)</option>
-            <option value="linuxcnc">LinuxCNC (.ngc)</option>
-            <option value="sbp">ShopBot (.sbp)</option>
+          <select data-path="post" id="postSel">
+            <optgroup label="Built in">
+              <option value="fluidnc">FluidNC (.nc)</option>
+              <option value="linuxcnc">LinuxCNC (.ngc)</option>
+              <option value="sbp">ShopBot (.sbp)</option>
+            </optgroup>
+            <optgroup label="Post files (.pp)" id="postFilesGroup"></optgroup>
           </select>
         </label>
+        <div class="post-files small">
+          <button type="button" class="link mini" id="postImport" title="Add a Vectric-format post (.pp), e.g. from VCarve / Aspire / PartWorks. It's saved in this computer's posts folder.">Import post (.pp)…</button>
+          <button type="button" class="link mini" id="postRemove" hidden>Remove this post file</button>
+          <input type="file" id="postFile" accept=".pp,.txt" hidden />
+          <div class="muted" id="postInfo"></div>
+        </div>
         <label class="check" id="arcsF" title="Curves (rounded corners, cups, reliefs, the pocket spiral) go out as G2/G3 arcs instead of many short lines: smaller files and smoother motion. ShopBot files use CG arcs."><input type="checkbox" data-path="arcs" /> Arcs (G2/G3 / CG)</label>
         <div id="sbpOpts" class="grid2">
           <label class="field">Spindle on<input data-path="sbpSpindleOn" /></label>

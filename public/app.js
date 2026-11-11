@@ -2,7 +2,8 @@ import { DEFAULT_SETTINGS, groupParts, mergeSettings, holdDownOf, usesSkin, uses
 import { carve, check, shade } from './lib/sim.js';
 import { nestParts, applySolution, nestKey, placedGeometry, partExits, rectMinus } from './lib/nest.js';
 import { sheetToolpaths, screwR, rectsOutline } from './lib/toolpath.js';
-import { post, fileExtension, SBP_MAX_TOOL, toolNumberOk } from './lib/post.js';
+import { post, postWithWarnings, fileExtension, SBP_MAX_TOOL, toolNumberOk } from './lib/post.js';
+import { parsePP } from './lib/vpp.js';
 import { DEFAULT_LIBRARY, TOOL_FIELDS, newTool, resolveTools } from './lib/tools.js';
 import { cutListRows, cutListCSV, fraction, roleName } from './lib/cutlist.js';
 import { layoutsHTML } from './lib/printsheets.js';
@@ -300,6 +301,7 @@ function renderSettings() {
     else el.value = v ?? '';
   }
   $('#sbpOpts').hidden = job.settings.post !== 'sbp';
+  renderPostInfo();
   $('#screwF').hidden = !job.settings.screws?.on;
   $('#spacingF').hidden = !!job.settings.commonLine;
   $('#lblHostF').hidden = job.settings.labels?.mode !== 'network';
@@ -348,11 +350,14 @@ function settingsProblems(s, tl) {
       out.push(`Tool "${t.name}" needs diameter, cut, entry and plunge ipm and stepdown above zero.`);
     }
   }
-  if (s.post === 'sbp') {
-    const max = s.sbpMaxTool || SBP_MAX_TOOL;
+  // tool numbers: the built-in ShopBot post, and post files that write [T]
+  if (s.post === 'sbp' || postPP(s)?.usesToolNumber) {
+    const max = s.post === 'sbp' ? s.sbpMaxTool || SBP_MAX_TOOL : 999;
     const used = [tl.tool, dado, ...tl.drills].filter((t, i, a) => t && a.findIndex((u) => u.id === t.id) === i);
     for (const t of used) {
-      if (!toolNumberOk(t, max)) out.push(`Tool "${t.name}" needs a tool # from 1 to ${max} (tool library). Without one, a change to it stops with PAUSE instead of C9 and the operator has to zero Z by hand.`);
+      if (!toolNumberOk(t, max)) out.push(s.post === 'sbp'
+        ? `Tool "${t.name}" needs a tool # from 1 to ${max} (tool library). Without one, a change to it stops with PAUSE instead of C9 and the operator has to zero Z by hand.`
+        : `Tool "${t.name}" needs a tool # (tool library): the post writes it as [T], and it would come out blank.`);
     }
     const seen = new Map();
     for (const t of used) {
@@ -458,7 +463,8 @@ function runNest() {
   const problems = settingsProblems(s, tl);
   if (problems.some((p) => p.includes('above zero') || p.startsWith('No profile tool'))) { showMessages([{ error: true, text: 'Fix tools:', items: problems }]); return; }
   results = [];
-  const ext = fileExtension(s);
+  if (String(s.post).startsWith('pp:') && !postPP(s)) { showMessages([{ error: true, text: `The post file "${s.post.slice(3)}" isn't in the posts folder any more — pick another post (Machine card).` }]); return; }
+  const ext = fileExtension({ ...s, pp: postPP(s) });
   const stamp = (job.name || 'job').replace(/[^\w-]+/g, '_').slice(0, 40);
   let quick = false;
   const stockNotes = [];
@@ -474,7 +480,7 @@ function runNest() {
       else if (nest && stockSig(kept.stock) !== stockSig(stock) && !job.cut) stockNotes.push(`${g.key}: the remnants on the rack changed — Nest & toolpath will look at them`);
     }
     if (!nest) { nest = nestParts(g.parts, nestOpts); quick = true; }
-    const cfg = { ...s, ...tl, thickness: g.thickness };
+    const cfg = { ...s, ...tl, thickness: g.thickness, ...(postPP(s) ? { pp: postPP(s) } : {}) };
     const mat = g.material.replace(/[^\w-]+/g, '_');
     const sheets = nest.sheets.map((sheet, i) => {
       const tp = sheetToolpaths(sheet, cfg);
@@ -501,7 +507,11 @@ function runNest() {
 }
 
 function textFor(item) {
-  if (!item.text) item.text = post(item.tp.moves, item.cfg, { title: item.title, material: item.group.material });
+  if (!item.text) {
+    const r = postWithWarnings(item.tp.moves, item.cfg, { title: item.title, material: item.group.material, fileName: item.file, sheetW: item.sheet.w, sheetH: item.sheet.h });
+    item.text = r.text;
+    if (r.warnings.length) showMessages([{ text: `Post "${item.cfg.pp?.name}":`, items: r.warnings }]);
+  }
   return item.text;
 }
 
@@ -903,6 +913,66 @@ $('#openJob').onchange = async (e) => {
   } catch (err) { showMessages([{ error: true, text: err.message }]); }
 };
 
+// ---------- post files (.pp) ----------
+// Vectric-format posts in this computer's posts folder; the job's post is
+// 'pp:<file name>' when it's one of them.
+let postFiles = [];             // [{ file, name, ext, error? }]
+const parsedPosts = new Map();  // file -> parsed post
+const postPP = (s) => (String(s.post).startsWith('pp:') ? parsedPosts.get(s.post.slice(3)) || null : null);
+
+async function loadPosts() {
+  try {
+    const r = await api('/api/posts');
+    postFiles = r.posts;
+    $('#postInfo').dataset.folder = r.folder;
+    parsedPosts.clear();
+    await Promise.all(postFiles.filter((p) => !p.error).map(async (p) => {
+      const t = await (await fetch('/api/posts/' + encodeURIComponent(p.file))).text();
+      try { parsedPosts.set(p.file, parsePP(t)); } catch (e) { p.error = e.message; }
+    }));
+  } catch { postFiles = []; }
+  $('#postFilesGroup').innerHTML = postFiles.map((p) => `<option value="pp:${esc(p.file)}"${p.error ? ' disabled' : ''}>${esc(p.name)}${p.error ? ' (unreadable)' : ''}</option>`).join('');
+  renderSettings();
+}
+
+function renderPostInfo() {
+  const s = job.settings;
+  const isFile = String(s.post).startsWith('pp:');
+  $('#postRemove').hidden = !isFile;
+  const folder = $('#postInfo').dataset.folder || '';
+  if (isFile) {
+    const pp = postPP(s);
+    $('#postInfo').textContent = pp ? `${s.post.slice(3)} · .${pp.ext} · ${pp.units === 'MM' ? 'millimetres' : 'inches'}${pp.warnings.length ? ' · ' + pp.warnings.join('; ') : ''}` : `${s.post.slice(3)} is missing from the posts folder`;
+  } else $('#postInfo').textContent = folder ? `Post files folder: ${folder}` : '';
+}
+
+$('#postImport').onclick = () => $('#postFile').click();
+$('#postFile').onchange = async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  // most posts are plain ASCII; older ones may be Windows-1252
+  let text = await f.text();
+  if (text.includes('\uFFFD')) text = new TextDecoder('windows-1252').decode(await f.arrayBuffer());
+  try {
+    const r = await api('/api/posts', { method: 'POST', body: JSON.stringify({ name: f.name, text }) });
+    await loadPosts();
+    job.settings.post = 'pp:' + r.file;
+    rememberSettings();
+    renderSettings();
+    showMessages([{ text: `Post "${r.name}" added (${r.file}) and selected.`, items: r.warnings }]);
+    if (results.length) runNest();
+  } catch (err) { showMessages([{ error: true, text: err.message }]); }
+};
+$('#postRemove').onclick = async () => {
+  const file = String(job.settings.post).slice(3);
+  if (!confirm(`Remove the post file "${file}" from this computer's posts folder?`)) return;
+  await api('/api/posts/' + encodeURIComponent(file), { method: 'DELETE' });
+  job.settings.post = 'fluidnc';
+  rememberSettings();
+  await loadPosts();
+};
+
 async function loadLibrary() {
   try { library = await api('/api/tools'); } catch { /* offline: defaults */ }
   renderSettings();
@@ -911,6 +981,7 @@ async function loadLibrary() {
 renderSettings();
 renderParts();
 loadLibrary();
+loadPosts();
 loadRemnants();
 refreshStatus();
 refreshJobs();

@@ -1,3 +1,4 @@
+import { runPP } from './vpp.js';
 // Post-processors. Input moves are inches, Z relative to material top.
 // cfg.post: 'fluidnc' | 'linuxcnc' | 'sbp'
 // cfg.zZero: 'top' (Z0 = top of sheet) or 'table' (Z0 = spoilboard).
@@ -222,8 +223,15 @@ function dedupe(lines, isComment) {
   return lines.filter((l, i) => i === 0 || isComment(l) || l !== lines[i - 1]);
 }
 
+// cfg.pp: a parsed Vectric-format post (.pp file, see vpp.js) - used instead
+// of the built-in posts when the job's post is one of the post files.
 export function post(moves, cfg, meta) {
+  if (cfg.pp) return runPP(cfg.pp, moves, cfg, meta, { fitArcs, zOut }).text;
   return cfg.post === 'sbp' ? postShopBot(moves, cfg, meta) : postGcode(moves, cfg, meta);
 }
+export function postWithWarnings(moves, cfg, meta) {
+  if (cfg.pp) return runPP(cfg.pp, moves, cfg, meta, { fitArcs, zOut });
+  return { text: post(moves, cfg, meta), warnings: [] };
+}
 
-export const fileExtension = (cfg) => (cfg.post === 'sbp' ? 'sbp' : cfg.post === 'linuxcnc' ? 'ngc' : 'nc');
+export const fileExtension = (cfg) => (cfg.pp ? cfg.pp.ext : cfg.post === 'sbp' ? 'sbp' : cfg.post === 'linuxcnc' ? 'ngc' : 'nc');

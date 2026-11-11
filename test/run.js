@@ -9,7 +9,8 @@ import { normalizeAll } from '../lib/parts.js';
 import { decode } from '../lib/onshape.js';
 import { nestParts, placedGeometry, applySolution, nestKey } from '../public/lib/nest.js';
 import { sheetToolpaths, placeTabs, legsOf, splitLobes, legsFromWalls, offcutCutLines, screwR } from '../public/lib/toolpath.js';
-import { postGcode, postShopBot } from '../public/lib/post.js';
+import { postGcode, postShopBot, post as postAny, fitArcs } from '../public/lib/post.js';
+import { parsePP } from '../public/lib/vpp.js';
 import { carve, check as simCheck } from '../public/lib/sim.js';
 import { machineTime } from '../public/lib/machine.js';
 import { DEFAULT_SETTINGS, groupParts, mergeSettings, holdDownOf } from '../public/lib/settings.js';
@@ -998,6 +999,96 @@ for (const g of groupParts(parts)) {
   console.log(`screw hold-downs: ${sheets} sheets, ${spots} spots, ${missing} without room, ${thinN} in thin strips, ${keeperN} in a keeper offcut, centre screw within ${centreWorst.toFixed(1)}\" of the parts' centre, ${extraSheets} extra sheet(s), closest cut ${worst.toFixed(3)}" from a screw centre`);
   check(worst >= screwR(DEFAULT_SETTINGS.screws) - 0.01, `no cut inside a screw's clearance (closest ${worst.toFixed(3)}")`);
   check(faults.planted, 'simulation catches a screw spot that gets cut');
+}
+
+// --- post files (.pp, Vectric format): the starter posts and a Vectric-style
+// ShopBot post must put the tool exactly where the moves say, in order; first
+// bit in the header (no stop), one stop per later bit and per screw stop ---
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const files = [
+    ...fs.readdirSync(path.join(here, '..', 'posts')).filter((f) => f.endsWith('.pp')).map((f) => path.join(here, '..', 'posts', f)),
+    path.join(here, 'fixtures', 'vectric-shopbot-style.pp'),
+  ];
+  let junk = false;
+  try { parsePP('hello\nworld'); } catch { junk = true; }
+  check(junk, 'a file that is not a post is refused');
+  const many = normalizeAll(sampleKitchen()).parts;
+  many.forEach((p) => { p.include = p.cnc !== false; });
+  const s = structuredClone(DEFAULT_SETTINGS);
+  s.screws = { on: true, head: 0.375, clear: 0.125, depth: 0.25 };
+  const tl = resolveTools(s, DEFAULT_LIBRARY, []);
+  const g = groupParts(many.filter((p) => p.include))[0];
+  const sh = nestParts(g.parts, { ...s.sheet, respectGrain: true, screws: { R: screwR(s.screws) } }).sheets[0];
+  // two bits on the sheet, so there's a bit change
+  const cfg0 = { ...s, ...tl, thickness: g.thickness, dadoTool: DEFAULT_LIBRARY.find((t) => t.id === 't-14down'), dadoSameTool: false };
+  const tp = sheetToolpaths(sh, cfg0);
+  const changes = tp.moves.filter((m) => m.toolchange).length;
+  const pauses = tp.moves.filter((m) => m.pause).length;
+  // replay a posted file: every position the tool goes to, in order
+  const replay = (text, sbp, scale) => {
+    const pts = [];
+    let X = null, Y = null, Z = null;
+    for (const raw of text.split('\n')) {
+      const l = raw.split(sbp ? "'" : '(')[0].trim();
+      if (!l) continue;
+      if (sbp) {
+        const a = l.split(',').map((v) => v.trim());
+        const num = (v, cur) => (v === '' || v == null ? cur : Number(v) / scale);
+        if (a[0] === 'J3' || a[0] === 'M3') { X = num(a[1], X); Y = num(a[2], Y); Z = num(a[3], Z); }
+        else if (a[0] === 'J2') { X = num(a[1], X); Y = num(a[2], Y); }
+        else if (a[0] === 'JZ' || a[0] === 'MZ') Z = num(a[1], Z);
+        else if (a[0] === 'CG') { X = num(a[2], X); Y = num(a[3], Y); }
+        else continue;
+      } else {
+        const w = Object.fromEntries([...l.matchAll(/([A-Z])(-?[\d.]+)/g)].map((m) => [m[1], Number(m[2]) / scale]));
+        if (!('G' in w) && !('X' in w) && !('Y' in w) && !('Z' in w)) continue;
+        const gg = Math.round((w.G ?? 1) * scale);
+        if (![0, 1, 2, 3].includes(gg) && 'G' in w && !('X' in w || 'Y' in w || 'Z' in w)) continue;
+        X = w.X ?? X; Y = w.Y ?? Y; Z = w.Z ?? Z;
+      }
+      if (X != null && Y != null && Z != null) pts.push([X, Y, Z]);
+    }
+    return pts;
+  };
+  for (const f of files) {
+    const pp = parsePP(fs.readFileSync(f, 'latin1'));
+    const name = path.basename(f);
+    const sbp = pp.ext === 'sbp';
+    const cfg = { ...cfg0, pp };
+    const text = postAny(tp.moves, cfg, { title: 'Test (sheet 1)', material: g.material, sheetW: sh.w, sheetH: sh.h, fileName: 'test.' + pp.ext });
+    // the moves as posted (arcs fitted when the post has arc blocks)
+    const list = pp.hasArcs ? fitArcs(tp.moves) : tp.moves;
+    const want = list.filter((m) => m.x != null).map((m) => [m.x, m.y, m.z]);
+    const got = replay(text, sbp, 1);
+    // every move's target appears, in order (the post may add retracts / home moves)
+    let k = 0, bad = 0;
+    for (const w of want) {
+      while (k < got.length && Math.hypot(got[k][0] - w[0], got[k][1] - w[1], got[k][2] - w[2]) > 2e-3) k++;
+      if (k >= got.length) { bad++; break; }
+      k++;
+    }
+    check(bad === 0, `${name}: every move lands where the toolpath says, in order (${want.length} moves)`);
+    // nothing cuts that the toolpath didn't: no position below the material top that isn't a move target
+    const cutPts = want.filter((w) => w[2] < 0);
+    const strays = got.filter((q) => q[2] < -1e-6 && !cutPts.some((w) => Math.hypot(q[0] - w[0], q[1] - w[1], q[2] - w[2]) < 2e-3));
+    check(strays.length === 0, `${name}: no extra position in the material (${strays.length}${strays.length ? ': ' + strays.slice(0, 3).map((q) => q.map((v) => v.toFixed(4)).join(',')).join(' ') : ''})`);
+    const L = text.split('\n');
+    if (name.startsWith('Cabinet CAM')) {
+      const stops = sbp ? L.filter((l) => /^C9\b/.test(l) || /^PAUSE\s*$/.test(l)).length : L.filter((l) => l.trim() === 'M0').length;
+      check(stops === changes - 1 + pauses, `${name}: first bit already loaded; one stop per later bit and per screw stop (${stops} for ${changes} bits, ${pauses} screw stop)`);
+      const firstCut = L.findIndex((l) => sbp ? /^(M3|MZ|CG),/.test(l) : /^G[123]\b/.test(l));
+      check(!L.slice(0, firstCut).some((l) => sbp ? /^C9\b|^PAUSE\s*$/.test(l) : l.trim() === 'M0'), `${name}: no stop before the first cut`);
+    }
+  }
+  // millimetres: the same post with UNITS = "MM" scales positions by 25.4
+  const fl = fs.readFileSync(path.join(here, '..', 'posts', 'Cabinet CAM FluidNC.pp'), 'latin1').replace('UNITS = "INCHES"', 'UNITS = "MM"').replace('G20 G90', 'G21 G90');
+  const ppmm = parsePP(fl);
+  const tmm = postAny(tp.moves, { ...cfg0, pp: ppmm }, { title: 'mm' });
+  const gotmm = replay(tmm, false, 25.4);
+  const want0 = fitArcs(tp.moves).filter((m) => m.x != null);
+  check(ppmm.units === 'MM' && gotmm.some((q) => Math.hypot(q[0] - want0[5].x, q[1] - want0[5].y) < 2e-3), 'UNITS "MM" posts positions in millimetres');
+  console.log(`post files: ${files.length} posts checked against ${tp.moves.filter((m) => m.x != null).length} moves`);
 }
 
 // --- rapid travel must not get worse (RULES.md, toolpaths rule 1) ---

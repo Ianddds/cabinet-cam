@@ -41,7 +41,8 @@
       "electron/**/*",
       "test/synthetic.js",
       "test/clipper-node.js",
-      "build/icon.png"
+      "build/icon.png",
+      "posts/**/*"
     ],
     "win": {
       "target": [

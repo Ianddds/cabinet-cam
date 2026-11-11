@@ -169,3 +169,6 @@ td select.overridden { border-color: var(--accent); color: var(--accent); }
 .keys-form input { width: 100%; }
 .keys-form .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .keys-form .error { color: #b3261e; min-height: 1em; margin: 0; }
+
+.post-files { display: grid; gap: 4px; margin: 2px 0 8px; }
+.post-files .muted { word-break: break-all; }

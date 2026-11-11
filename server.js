@@ -23,8 +23,8 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => {
-  console.error(e);
-  res.status(500).json({ error: e.message });
+  if (!e.status) console.error(e);
+  res.status(e.status || 500).json({ error: e.message });
 });
 
 // ---------- status / auth ----------
@@ -85,6 +85,60 @@ app.get('/api/sample', wrap(async (req, res) => {
   const { sampleKitchen } = await import('./test/synthetic.js');
   const { parts, errors } = normalizeAll(sampleKitchen());
   res.json({ source: { documentName: 'Sample kitchen (offline)', elementName: 'Synthetic parts' }, parts, errors, notices: [] });
+}));
+
+// ---------- post-processors (.pp files) ----------
+// Vectric-format posts live in <data>/posts, one file each. The Cabinet CAM
+// starter posts (posts/ in the app) are copied there the first time; after
+// that the folder is yours: edit, copy, delete. Imported posts are checked
+// (parsed) before they're saved.
+const POSTS = dataPath('posts');
+fs.mkdirSync(POSTS, { recursive: true });
+{
+  const marker = path.join(POSTS, '.starter-posts');
+  const done = new Set(fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').split(/\r?\n/).filter(Boolean) : []);
+  const src = path.join(__dirname, 'posts');
+  for (const f of fs.existsSync(src) ? fs.readdirSync(src).filter((x) => /\.pp$/i.test(x)) : []) {
+    if (done.has(f)) continue;   // copied before (maybe edited or deleted since): leave it
+    if (!fs.existsSync(path.join(POSTS, f))) fs.copyFileSync(path.join(src, f), path.join(POSTS, f));
+    done.add(f);
+  }
+  fs.writeFileSync(marker, [...done].join('\n') + '\n');
+}
+const postFile = (name) => {
+  const base = path.basename(String(name || ''));
+  if (!/\.pp$/i.test(base) || base.startsWith('.')) throw Object.assign(new Error('Post files end in .pp'), { status: 400 });
+  return path.join(POSTS, base);
+};
+app.get('/api/posts', wrap(async (req, res) => {
+  const { parsePP } = await import('./public/lib/vpp.js');
+  const list = [];
+  for (const f of fs.readdirSync(POSTS).filter((x) => /\.pp$/i.test(x)).sort()) {
+    try {
+      const pp = parsePP(fs.readFileSync(path.join(POSTS, f), 'latin1'));
+      list.push({ file: f, name: pp.name, ext: pp.ext, units: pp.units });
+    } catch (e) { list.push({ file: f, name: f, error: e.message }); }
+  }
+  res.json({ folder: POSTS, posts: list });
+}));
+app.get('/api/posts/:file', wrap(async (req, res) => {
+  const f = postFile(req.params.file);
+  if (!fs.existsSync(f)) return res.status(404).json({ error: 'No such post file' });
+  res.type('text/plain').send(fs.readFileSync(f, 'latin1'));
+}));
+app.post('/api/posts', wrap(async (req, res) => {
+  const { parsePP } = await import('./public/lib/vpp.js');
+  const { name, text } = req.body || {};
+  let pp;
+  try { pp = parsePP(String(text || '')); } catch (e) { return res.status(400).json({ error: `Not a usable post: ${e.message}` }); }
+  let base = path.basename(String(name || pp.name || 'post')).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\.(pp|txt)$/i, '');
+  const f = postFile(`${base || 'post'}.pp`);
+  fs.writeFileSync(f, String(text), 'latin1');
+  res.json({ file: path.basename(f), name: pp.name, ext: pp.ext, warnings: pp.warnings });
+}));
+app.delete('/api/posts/:file', wrap(async (req, res) => {
+  fs.rmSync(postFile(req.params.file), { force: true });
+  res.json({ ok: true });
 }));
 
 // ---------- tool library ----------
