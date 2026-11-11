@@ -1,8 +1,7 @@
 # Cabinet CAM (proof of concept)
 
 Onshape Part Studio → flat parts → sheet nesting → G-code, for cabinet case parts.
-Profiles and dados/rabbets only. Runs locally; the layout matches the PDF collab
-app (Node + Express server, plain JS front end) so it can move to the same VM later.
+Profiles and dados/rabbets only. Runs locally; 
 
 See RULES.md before changing toolpath or FeatureScript code.
 
@@ -241,4 +240,4 @@ test/                  synthetic Onshape data + pipeline test
 - Ramped entries and lead-ins, ramped tabs
 - True-shape nesting for arched or radius parts
 - Part labels / cut list PDF
-- User logins (reuse the PDF collab sign-in when it moves to the VM)
+
