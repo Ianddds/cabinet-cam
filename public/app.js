@@ -373,6 +373,7 @@ document.querySelector('.side').addEventListener('change', (e) => {
   if (!el.dataset.path) return;
   let v = el.type === 'checkbox' ? el.checked : el.value;
   if (el.type === 'number') v = parseFloat(v);
+  if (el.type === 'number' && Number.isNaN(v) && el.dataset.blank === 'null') v = null; // blank = use the default it names
   if (el.dataset.path === 'climb') v = v === 'true';
   setPath(job.settings, el.dataset.path, v);
   rememberSettings();
@@ -695,13 +696,14 @@ const pts = (poly) => poly.map(([x, y]) => `${x.toFixed(3)},${y.toFixed(3)}`).jo
 function renderSheet(item) {
   const sh = item.sheet;
   const s = { sheetW: sh.w ?? item.cfg.sheet.sheetW, sheetH: sh.h ?? item.cfg.sheet.sheetH, trim: sh.trim ?? item.cfg.sheet.trim };
+  const tx = sh.trimX ?? s.trim;
   const st = item.tp.stats;
   const pad = 1.5;
   const H = s.sheetH;
   const fy = (y) => H - y; // machine Y up
   let svg = `<svg class="sheet-svg${screwEdit ? ' screw-edit' : ''}" viewBox="${-pad} ${-pad} ${s.sheetW + 2 * pad} ${H + 2 * pad}" xmlns="http://www.w3.org/2000/svg">`;
   svg += `<rect class="sheet" x="0" y="0" width="${s.sheetW}" height="${H}"/>`;
-  svg += `<rect class="trim" x="${s.trim}" y="${s.trim}" width="${s.sheetW - 2 * s.trim}" height="${H - 2 * s.trim}"/>`;
+  svg += `<rect class="trim" x="${tx}" y="${s.trim}" width="${s.sheetW - 2 * tx}" height="${H - 2 * s.trim}"/>`;
   // an L / T remnant: the missing part of its bounding box
   if (sh.remnant?.rects?.length > 1) {
     let miss = [{ x: 0, y: 0, w: s.sheetW, h: H }];

@@ -1,6 +1,8 @@
 // Default job settings (inches, inches/minute) and part grouping.
 export const DEFAULT_SETTINGS = {
-  sheet: { sheetW: 96, sheetH: 48, trim: 0.5, spacing: 0.45 },
+  // trim: clean-up margin along the long edges; endTrim: along the ends (x = 0
+  // and x = sheetW), null = same as trim
+  sheet: { sheetW: 96, sheetH: 48, trim: 0.5, endTrim: null, spacing: 0.45 },
   respectGrain: true,
   nestSeconds: 6,
   // remnants: use them in nests; trim = clean-up margin around one; offcuts are

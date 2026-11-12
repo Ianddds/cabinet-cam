@@ -148,7 +148,7 @@ function makeItems(parts, opts) {
   if (opts.screws?.R > 0) {
     const sw = 2 * opts.screws.R + opts.spacing;
     const area = items.reduce((a, it) => a + it.w * it.h, 0);
-    const n = Math.ceil(area / ((opts.sheetW - 2 * opts.trim) * (opts.sheetH - 2 * opts.trim))) + 1;
+    const n = Math.ceil(area / ((opts.sheetW - 2 * endTrimOf(opts)) * (opts.sheetH - 2 * opts.trim))) + 1;
     for (let i = 0; i < n; i++) items.push({ screw: true, part: null, copy: i + 1, px: 0, py: 0, w: sw, h: sw, o: { normal: true, rotated: false }, key: `screw#${i + 1}` });
   }
   return items;
@@ -537,9 +537,12 @@ export function applySolution(parts, opts, solution) {
 
 // Identifies what a nest depends on (parts, sizes, grain, sheet), so a stored
 // solution is only reused for the same inputs.
+// sheet trim along the ends (x = 0 and x = sheetW); opts.trim is the long edges
+const endTrimOf = (opts) => (Number.isFinite(opts.endTrim) && opts.endTrim >= 0 ? opts.endTrim : opts.trim);
+
 export function nestKey(parts, opts) {
   const items = makeItems(parts, opts).map((it) => `${it.key}:${it.w.toFixed(4)}x${it.h.toFixed(4)}:${it.o.normal ? 1 : 0}${it.o.rotated ? 1 : 0}`);
-  const s = [opts.sheetW, opts.sheetH, opts.trim, opts.spacing, opts.commonLine ? 'cl' : '', opts.screws?.R > 0 ? `sc5-${opts.screws.R}` : '', items.sort().join(',')].join('|');
+  const s = [opts.sheetW, opts.sheetH, opts.trim, endTrimOf(opts) === opts.trim ? '' : `e${endTrimOf(opts)}`, opts.spacing, opts.commonLine ? 'cl' : '', opts.screws?.R > 0 ? `sc5-${opts.screws.R}` : '', items.sort().join(',')].join('|');
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
   return h.toString(36) + '-' + items.length;
@@ -569,7 +572,7 @@ function binSize(opts) {
     .filter((r) => r.binW > opts.spacing && r.binH > opts.spacing)
     .sort((a, b) => remArea(b) - remArea(a) || String(a.id).localeCompare(String(b.id)));
   const screws = opts.screws?.R > 0 ? { R: opts.screws.R } : null;
-  return { binW: opts.sheetW - 2 * opts.trim + opts.spacing, binH: opts.sheetH - 2 * opts.trim + opts.spacing, remnants, commonLine: !!opts.commonLine, spacing: opts.spacing, trim: opts.trim, sheetW: opts.sheetW, screws, remnantMin: opts.remnantMin };
+  return { binW: opts.sheetW - 2 * endTrimOf(opts) + opts.spacing, binH: opts.sheetH - 2 * opts.trim + opts.spacing, remnants, commonLine: !!opts.commonLine, spacing: opts.spacing, trim: opts.trim, sheetW: opts.sheetW, screws, remnantMin: opts.remnantMin };
 }
 
 const remArea = (r) => (r.rects?.length > 1 ? r.rects.reduce((a, q) => a + q.w * q.h, 0) : r.w * r.h);
@@ -634,7 +637,9 @@ function freeKeepers(bin, opts) {
 
 function finish(res, opts) {
   const sheets = res.bins.map((b) => {
+    // tx: trim at the ends (x), trim: along the long edges (y)
     const trim = b.rem ? b.rem.trim : opts.trim;
+    const tx = b.rem ? b.rem.trim : endTrimOf(opts);
     const w = b.rem ? b.rem.w : opts.sheetW, h = b.rem ? b.rem.h : opts.sheetH;
     // Mirror the layout so the biggest offcut sits on the stock's zero corner:
     // the remnant keeps that corner (and its two edges), so next time it goes
@@ -649,16 +654,16 @@ function finish(res, opts) {
       part: it.part, copy: it.copy,
       label: it.part.sourceNames?.[it.copy - 1] || it.part.name,
       cabinet: it.part.sourceCabinets?.[it.copy - 1] ?? it.part.cabinet,
-      x: fx(r.x, r.w) + trim + (r.rotated ? it.py : it.px), y: fy(r.y, r.h) + trim + (r.rotated ? it.px : it.py), rotated: r.rotated,
+      x: fx(r.x, r.w) + tx + (r.rotated ? it.py : it.px), y: fy(r.y, r.h) + trim + (r.rotated ? it.px : it.py), rotated: r.rotated,
     }));
     // offcuts in stock coordinates; where one reaches the edge of the usable
     // area it runs on out to the stock's edge (nothing to cut there)
     const toStock = (k) => {
-      let x = fx(k.x, k.w + sp) + trim, y = fy(k.y, k.h + sp) + trim;
+      let x = fx(k.x, k.w + sp) + tx, y = fy(k.y, k.h + sp) + trim;
       let x1 = x + k.w, y1 = y + k.h;
-      if (x - trim < e) x = 0;
+      if (x - tx < e) x = 0;
       if (y - trim < e) y = 0;
-      if (x1 > w - trim - e) x1 = w;
+      if (x1 > w - tx - e) x1 = w;
       if (y1 > h - trim - e) y1 = h;
       return { x, y, w: x1 - x, h: y1 - y };
     };
@@ -668,9 +673,9 @@ function finish(res, opts) {
       return rects.length > 1 ? { ...bboxOf(rects), rects } : rects[0];
     });
     // screw spots (centres) in stock coordinates, mirrored with the parts
-    const screws = (b.screws?.spots || []).map((q) => ({ x: (mx ? bw - sp - q.x : q.x) + trim, y: (my ? bh - sp - q.y : q.y) + trim }));
+    const screws = (b.screws?.spots || []).map((q) => ({ x: (mx ? bw - sp - q.x : q.x) + tx, y: (my ? bh - sp - q.y : q.y) + trim }));
     return {
-      w, h, trim,
+      w, h, trim, trimX: tx,
       screws,
       screwsMissing: b.screws?.missing || 0,
       screwsThin: b.screws?.thin || 0,

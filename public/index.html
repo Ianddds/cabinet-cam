@@ -37,7 +37,8 @@
         <div class="grid2">
           <label class="field">Length X<input type="number" step="0.125" data-path="sheet.sheetW" /></label>
           <label class="field">Width Y<input type="number" step="0.125" data-path="sheet.sheetH" /></label>
-          <label class="field">Edge trim<input type="number" step="0.0625" data-path="sheet.trim" /></label>
+          <label class="field" title="Clean-up margin along the long edges of the sheet (Y = 0 and Y = width)">Edge trim<input type="number" step="0.0625" min="0" data-path="sheet.trim" /></label>
+          <label class="field" title="Clean-up margin along the ends of the sheet (X = 0 and X = length). Blank = same as Edge trim.">End trim<input type="number" step="0.0625" min="0" placeholder="same" data-blank="null" data-path="sheet.endTrim" /></label>
           <label class="field" id="spacingF">Part spacing<input type="number" step="0.0625" data-path="sheet.spacing" /></label>
           <label class="field" title="How long Nest &amp; toolpath searches for a better layout. Each material searches side by side. 0 = quick nest only.">Nest search (sec)<input type="number" step="1" min="0" max="60" data-path="nestSeconds" /></label>
         </div>

@@ -1001,6 +1001,24 @@ for (const g of groupParts(parts)) {
   check(faults.planted, 'simulation catches a screw spot that gets cut');
 }
 
+// --- separate end trim: parts stay endTrim from the ends (X) and trim from the long edges (Y) ---
+{
+  const many = normalizeAll(sampleKitchen()).parts;
+  many.forEach((p) => { p.include = p.cnc !== false; });
+  const g = groupParts(many.filter((p) => p.include))[0];
+  const opts = { ...DEFAULT_SETTINGS.sheet, trim: 0.5, endTrim: 2, respectGrain: true };
+  const res = nestParts(g.parts, opts);
+  let worst = { x: 1e9, y: 1e9 };
+  for (const sh of res.sheets) for (const pl of sh.placements) {
+    const b = placedGeometry(pl).box;
+    worst.x = Math.min(worst.x, b.x0, sh.w - b.x1);
+    worst.y = Math.min(worst.y, b.y0, sh.h - b.y1);
+  }
+  check(worst.x >= 2 - 1e-6 && worst.y >= 0.5 - 1e-6, `end trim 2", edge trim 0.5": closest part to an end ${worst.x.toFixed(3)}, to a long edge ${worst.y.toFixed(3)}`);
+  check(nestKey(g.parts, opts) !== nestKey(g.parts, { ...opts, endTrim: null }), 'end trim is part of the nest key');
+  check(nestKey(g.parts, { ...opts, endTrim: null }) === nestKey(g.parts, { ...opts, endTrim: 0.5 }), 'end trim blank = same as edge trim');
+}
+
 // --- hand-placed screws: drilled even with automatic screws off, cuts keep
 // clear of them, and bad spots (on a part, on a cut line, off the sheet) are caught ---
 {
