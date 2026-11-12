@@ -181,3 +181,7 @@ td select.overridden { border-color: var(--accent); color: var(--accent); }
 
 .post-files { display: grid; gap: 4px; margin: 2px 0 8px; }
 .post-files .muted { word-break: break-all; }
+
+.cab-filter { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin: 4px 0 8px; }
+.cab-chip { display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px; border: 1px solid #c8ced6; border-radius: 12px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.cab-chip.off { opacity: 0.5; text-decoration: line-through; }

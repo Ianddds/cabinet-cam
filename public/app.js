@@ -96,7 +96,7 @@ function setParts(data) {
   delete data.raw;
   const sameSource = job.source?.url && data.source?.url === job.source.url;
   job.parts = sameSource ? carryOverrides(job.parts, data.parts) : data.parts;
-  if (!sameSource) { job.nests = {}; job.manualScrews = {}; }
+  if (!sameSource) { job.nests = {}; job.manualScrews = {}; job.offCabinets = []; }
   if (job.cut) {
     // a cut job is a record of what was cut: new parts start a new job
     job = { ...job, id: null, cut: null, nests: {}, manualScrews: {}, name: job.name ? `${job.name} (2)` : '' };
@@ -123,6 +123,60 @@ function setParts(data) {
   renderRemnants();
 }
 
+// ---------- cabinets in this run ----------
+// job.offCabinets: cabinet codes left out of this run. Each copy of a merged
+// part knows its cabinet (sourceCabinets), so only those copies drop out.
+const NO_CAB = '(no cabinet)';
+const cabOf = (c) => c || NO_CAB;
+function jobCabinets() {
+  const set = new Set();
+  for (const p of job.parts) for (const c of p.sourceCabinets || [p.cabinet]) set.add(cabOf(c));
+  return [...set].sort((a, b) => (a === NO_CAB) - (b === NO_CAB) || a.localeCompare(b, undefined, { numeric: true }));
+}
+function forRun(p) {
+  const off = new Set(job.offCabinets || []);
+  if (!off.size) return p;
+  const cabs = (p.sourceCabinets?.length ? p.sourceCabinets : [p.cabinet]).map(cabOf);
+  if (!cabs.some((c) => off.has(c))) return p;
+  if (cabs.length === p.qty) {
+    const keep = cabs.map((c, i) => (off.has(c) ? -1 : i)).filter((i) => i >= 0);
+    const names = p.sourceNames || [];
+    const srcCabs = p.sourceCabinets || [];
+    return { ...p, qty: keep.length, sourceNames: keep.map((i) => names[i] ?? p.name), sourceCabinets: keep.map((i) => srcCabs[i] ?? p.cabinet),
+      cabinet: [...new Set(keep.map((i) => srcCabs[i] ?? p.cabinet).filter(Boolean))].join(', ') };
+  }
+  // quantity changed by hand: can't tell copies apart, so drop it only if every cabinet is off
+  return cabs.every((c) => off.has(c)) ? { ...p, qty: 0 } : p;
+}
+const runParts = () => job.parts.map(forRun);
+
+function renderCabFilter() {
+  const el = $('#cabFilter');
+  const cabs = jobCabinets();
+  if (cabs.length < 2) { el.innerHTML = ''; el.hidden = true; return; }
+  const off = new Set(job.offCabinets || []);
+  el.hidden = false;
+  el.innerHTML = `<span class="muted small">Cabinets (${cabs.length - cabs.filter((c) => off.has(c)).length} of ${cabs.length}):</span>
+    <button class="link mini" data-cab-all>All</button> <button class="link mini" data-cab-none>None</button>
+    ${cabs.map((c) => `<label class="cab-chip${off.has(c) ? ' off' : ''}"><input type="checkbox" data-cab="${esc(c)}" ${off.has(c) ? '' : 'checked'}> ${esc(c)}</label>`).join('')}`;
+}
+function setOffCabinets(list) {
+  job.offCabinets = list;
+  renderParts();
+  if (results.length) runNest();
+}
+$('#cabFilter').addEventListener('change', (e) => {
+  const c = e.target.dataset.cab;
+  if (c == null) return;
+  const off = new Set(job.offCabinets || []);
+  if (e.target.checked) off.delete(c); else off.add(c);
+  setOffCabinets([...off]);
+});
+$('#cabFilter').addEventListener('click', (e) => {
+  if (e.target.hasAttribute('data-cab-all')) setOffCabinets([]);
+  if (e.target.hasAttribute('data-cab-none')) setOffCabinets(jobCabinets());
+});
+
 // ---------- parts table ----------
 // Grain cell: override select; "Auto" shows what the job rule / model gives.
 function grainCell(p) {
@@ -139,25 +193,28 @@ function renderParts() {
     wrap.innerHTML = '<p class="muted empty">Paste a Part Studio URL or load the sample.</p>';
     $('#nestBtn').disabled = true;
     $('#partsSummary').textContent = '';
+    renderCabFilter();
     return;
   }
+  renderCabFilter();
   const groups = groupParts(job.parts);
   let rows = '';
   for (const g of groups) {
-    const count = g.parts.filter((p) => p.include).reduce((a, p) => a + (p.qty || 0), 0);
+    const count = g.parts.filter((p) => p.include).reduce((a, p) => a + (forRun(p).qty || 0), 0);
     rows += `<tr class="group"><td colspan="10">${esc(g.key)} — ${count} pcs</td></tr>`;
     for (const p of g.parts) {
       const i = job.parts.indexOf(p);
+      const runQty = forRun(p).qty;
       const names = p.sourceNames?.length > 1 ? p.sourceNames.join('\n') : '';
       const warn = (p.cnc === false ? '<span class="badge cl" title="Not cut on the CNC — on the cut list">cut list</span> ' : '') +
         (p.untagged ? '<span class="badge" title="No cabinetPart tag">not tagged</span> ' : '') +
         (p.warnings?.length - (p.untagged ? 1 : 0) > 0 ? `<span class="badge" title="${esc(p.warnings.join('\n'))}">${p.warnings.length - (p.untagged ? 1 : 0)} warn</span>` : '');
-      rows += `<tr class="${p.include ? '' : 'off'}" data-i="${i}">
+      rows += `<tr class="${p.include && runQty > 0 ? '' : 'off'}" data-i="${i}">
         <td><input type="checkbox" data-k="include" ${p.include ? 'checked' : ''}></td>
         <td class="name-cell" title="${esc(names)}">${esc(p.name)}${p.sourceNames?.length > 1 ? ` <span class="muted">+${p.sourceNames.length - 1}</span>` : ''}${
           p.cnc !== false && p.qty > 1 && (p.sourceNames || []).length === p.qty ? ' <button class="link mini" data-split title="Split into one row per part, to change one of them">split</button>' : ''}</td>
         <td>${esc(p.cabinet)}</td>
-        <td><input class="qty" type="number" min="0" step="1" data-k="qty" value="${p.qty}"></td>
+        <td><input class="qty" type="number" min="0" step="1" data-k="qty" value="${p.qty}">${runQty !== p.qty ? ` <span class="muted small" title="Copies in the cabinets ticked above">→ ${runQty}</span>` : ''}</td>
         <td class="num">${f3(p.width)}</td><td class="num">${f3(p.height)}</td><td class="num">${f3(p.thickness)}</td>
         <td>${grainCell(p)}</td>
         <td class="num">${p.pockets.length || ''}${p.holes.length ? ` / ${p.holes.length} cut` : ''}</td>
@@ -166,7 +223,7 @@ function renderParts() {
     }
   }
   wrap.innerHTML = `<table><thead><tr><th></th><th>Part</th><th>Cab</th><th>Qty</th><th>Length</th><th>Width</th><th>Thk</th><th>Grain</th><th>Dados</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
-  const total = job.parts.filter((p) => p.include).reduce((a, p) => a + (p.qty || 0), 0);
+  const total = runParts().filter((p) => p.include).reduce((a, p) => a + (p.qty || 0), 0);
   $('#partsSummary').textContent = `${job.parts.length} unique · ${total} pcs · ${groups.length} material group${groups.length === 1 ? '' : 's'}`;
   $('#nestBtn').disabled = total === 0;
   renderCutList();
@@ -187,7 +244,7 @@ function cutListHtml(rows) {
 }
 
 function renderCutList() {
-  const rows = cutListRows(job.parts);
+  const rows = cutListRows(runParts().filter((p) => p.qty > 0));
   $('#cutListCard').hidden = !rows.length;
   if (!rows.length) return;
   const pcs = rows.reduce((a, r) => a + r.qty, 0);
@@ -392,7 +449,7 @@ function nestGroups() {
   if (s.commonLine) { base.spacing = resolveTools(s, library, job.toolSnapshot || []).tool.dia; base.commonLine = true; }
   // screw hold-downs: one near each corner of the parts' area and one at its centre
   if (s.screws?.on) base.screws = { R: screwR(s.screws) };
-  return groupParts(applyGrain(job.parts.filter((p) => p.include && p.qty > 0))).map((g) => {
+  return groupParts(applyGrain(runParts().filter((p) => p.include && p.qty > 0))).map((g) => {
     const key = nestKey(g.parts, base) + `|rt${base.remnantTrim}`;
     const kept = job.nests?.[key];
     // a job marked as cut keeps the stock it was nested on; otherwise use what's on the rack now
@@ -970,7 +1027,7 @@ $('#fetchParts').onclick = (e) => busy(e.target, async () => {
   refreshStatus();
 });
 const jobStamp = () => (job.name || 'job').replace(/[^\w-]+/g, '_').slice(0, 40);
-$('#cutListCsv').onclick = () => download(`${jobStamp()}_cutlist.csv`, cutListCSV(cutListRows(job.parts)));
+$('#cutListCsv').onclick = () => download(`${jobStamp()}_cutlist.csv`, cutListCSV(cutListRows(runParts().filter((p) => p.qty > 0))));
 $('#cutListPrint').onclick = () => {
   const w = window.open('', '_blank');
   if (!w) { showMessages([{ error: true, text: 'Allow pop-ups for this page to print the cut list.' }]); return; }
@@ -980,7 +1037,7 @@ $('#cutListPrint').onclick = () => {
     th{font-size:11px;text-transform:uppercase;color:#555}td.num{text-align:right;font-variant-numeric:tabular-nums}
     tr.group td{background:#eee;font-weight:600}.muted{color:#777}.small{font-size:11px}</style></head><body>
     <h1>Cut list — ${esc(job.name || '')}</h1><p>${new Date().toLocaleDateString()} · parts not cut on the CNC</p>
-    ${cutListHtml(cutListRows(job.parts))}</body></html>`);
+    ${cutListHtml(cutListRows(runParts().filter((p) => p.qty > 0)))}</body></html>`);
   w.document.close();
   w.focus();
   w.print();
