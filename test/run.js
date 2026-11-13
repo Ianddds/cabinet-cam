@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import './clipper-node.js';
-import { sampleKitchen } from './synthetic.js';
+import { sampleKitchen, rawPart } from './synthetic.js';
 import { inRegion, difference, offset, union, area } from '../public/lib/clip.js';
 import { normalizeAll } from '../lib/parts.js';
 import { decode } from '../lib/onshape.js';
@@ -999,6 +999,17 @@ for (const g of groupParts(parts)) {
   console.log(`screw hold-downs: ${sheets} sheets, ${spots} spots, ${missing} without room, ${thinN} in thin strips, ${keeperN} in a keeper offcut, centre screw within ${centreWorst.toFixed(1)}\" of the parts' centre, ${extraSheets} extra sheet(s), closest cut ${worst.toFixed(3)}" from a screw centre`);
   check(worst >= screwR(DEFAULT_SETTINGS.screws) - 0.01, `no cut inside a screw's clearance (closest ${worst.toFixed(3)}")`);
   check(faults.planted, 'simulation catches a screw spot that gets cut');
+}
+
+// --- merging identical parts: a half turn still merges, a mirror image never does ---
+{
+  // a back with a notch at one bottom corner, its half-turned twin, and its mirror image
+  const notchL = [[0, 0.5], [1.4, 0.5], [1.4, 0], [12, 0], [12, 4.5], [0, 4.5]];
+  const turned = notchL.map(([x, y]) => [12 - x, 4.5 - y]);
+  const mirrored = notchL.map(([x, y]) => [12 - x, y]).reverse();
+  const res = normalizeAll([rawPart('Back A', notchL, 0.5, [], { role: 'BACK' }), rawPart('Back AB', turned, 0.5, [], { role: 'BACK' }), rawPart('Back ABC', mirrored, 0.5, [], { role: 'BACK' })]);
+  const rows = res.parts.map((p) => `${p.qty}:${p.sourceNames.join('+')}`).sort();
+  check(res.parts.length === 2 && res.parts.some((p) => p.qty === 2), `half-turned twin merges, mirror image stays its own row (${rows.join(', ')})`);
 }
 
 // --- separate end trim: parts stay endTrim from the ends (X) and trim from the long edges (Y) ---
