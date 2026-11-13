@@ -4,7 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import './clipper-node.js';
 import { sampleKitchen, rawPart } from './synthetic.js';
-import { inRegion, difference, offset, union, area } from '../public/lib/clip.js';
+import { inRegion, difference, offset, union, area, intersect } from '../public/lib/clip.js';
+import { placeShapes, isShapePart } from '../public/lib/shapes.js';
 import { normalizeAll } from '../lib/parts.js';
 import { decode } from '../lib/onshape.js';
 import { nestParts, placedGeometry, applySolution, nestKey } from '../public/lib/nest.js';
@@ -999,6 +1000,73 @@ for (const g of groupParts(parts)) {
   console.log(`screw hold-downs: ${sheets} sheets, ${spots} spots, ${missing} without room, ${thinN} in thin strips, ${keeperN} in a keeper offcut, centre screw within ${centreWorst.toFixed(1)}\" of the parts' centre, ${extraSheets} extra sheet(s), closest cut ${worst.toFixed(3)}" from a screw centre`);
   check(worst >= screwR(DEFAULT_SETTINGS.screws) - 0.01, `no cut inside a screw's clearance (closest ${worst.toFixed(3)}")`);
   check(faults.planted, 'simulation catches a screw spot that gets cut');
+}
+
+// --- custom shapes: fitted by outline among the cabinet parts, turned only as
+// their grain allows; never touching, inside the sheet, cut cleanly ---
+{
+  const attrs = [{ cabinetPart: true, custom: true, material: '3/4 Baltic Birch', cabinetCode: 'CUSTOM', role: 'PANEL', cnc: true }];
+  const custom = (name, poly, pockets = []) => rawPart(name, poly, 0.75, pockets, { attributes: attrs });
+  const raw = [...sampleKitchen()];
+  for (let i = 0; i < 4; i++) raw.push(custom('Trap' + i, [[0, 0], [20, 0], [14, 10], [0, 10]]));
+  for (let i = 0; i < 6; i++) raw.push(custom('Tri' + i, [[0, 0], [16, 0], [0, 12]]));
+  for (let i = 0; i < 4; i++) raw.push(custom('Brk' + i, [[0, 0], [18, 0], [18, 5], [5, 5], [5, 14], [0, 14]], [{ poly: [[8, 0], [8.75, 0], [8.75, 5], [8, 5]], depth: 0.25 }]));
+  raw.push(custom('Plain', [[0, 0], [12, 0], [12, 6], [0, 6]]));   // a rectangular custom part: nested as now
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const base = normalizeAll(raw).parts;
+  // everything the rectangle nester sees (cabinet parts and the plain custom part)
+  const cabinetOnly = groupParts(applyGrain(base.filter((p) => p.include && !isShapePart(p, { shapeStep: 15 }))))[0];
+  check(!base.some((p) => !p.custom && isShapePart(p, { shapeStep: 15 })), 'cabinet parts are never nested as shapes');
+  check(base.some((p) => p.name === 'Plain' && p.custom && !isShapePart(p, { shapeStep: 15 })), 'a rectangular custom part nests as a rectangle');
+  for (const grain of ['fixed', 'free']) {
+    const all = structuredClone(base);
+    all.forEach((p) => { if (p.custom && grain === 'free') { p.grain = 'none'; p.modelGrain = 'none'; } });
+    let bad = [], angled = 0, shapes = 0, sheetsWith = 0, sheetsWithout = 0, mirrored = 0;
+    for (const cl of [false, true]) for (const hold of ['skin', 'tabs']) for (const g of groupParts(applyGrain(all.filter((p) => p.include)))) {
+      const nOpts = { ...s0.sheet, respectGrain: true, shapeStep: 15, shapeSpacing: s0.sheet.spacing, ...(cl ? { spacing: tl.tool.dia, commonLine: true } : {}) };
+      const rect = nestParts(g.parts, nOpts);
+      const nest = placeShapes(rect, g.parts, nOpts);
+      if (!cl && hold === 'skin') { sheetsWith += nest.sheets.length; sheetsWithout += nestParts(g.parts, { ...nOpts, shapeStep: 0 }).sheets.length; }
+      // same layout again (reopening a job), and replayed from its spots
+      const again = placeShapes(nestParts(g.parts, nOpts), g.parts, nOpts);
+      const replay = placeShapes(nestParts(g.parts, nOpts), g.parts, nOpts, nest.spots);
+      const sig = (n) => JSON.stringify(n.sheets.map((sh) => sh.placements.filter((pl) => pl.shape).map((pl) => [pl.label, pl.angle, +pl.x.toFixed(4), +pl.y.toFixed(4)])));
+      if (sig(again) !== sig(nest)) bad.push('not the same layout twice');
+      if (sig(replay) !== sig(nest)) bad.push('replay differs');
+      for (const sh of nest.sheets) {
+        const P = sh.placements, G = P.map((pl) => placedGeometry(pl).outline);
+        const sp = cl ? tl.tool.dia : s0.sheet.spacing;
+        for (const [i, pl] of P.entries()) {
+          if (!pl.shape) continue;
+          shapes++;
+          if (pl.angle % 90) angled++;
+          if (pl.mirror) { mirrored++; if (pl.part.pockets.length) bad.push(`${pl.label}: a part with a dado turned over`); }
+          const g0 = pl.part.grain;
+          if (g0 === 'length' && ![0, 180].includes(pl.angle)) bad.push(`${pl.label} turned ${pl.angle} against its grain`);
+          const tx = sh.trimX ?? sh.trim;
+          if (G[i].some(([x, y]) => x < tx - 1e-3 || y < sh.trim - 1e-3 || x > sh.w - tx + 1e-3 || y > sh.h - sh.trim + 1e-3)) bad.push(`${pl.label} outside the usable sheet`);
+          const grown = offset([G[i]], Math.max(sp, s0.sheet.spacing) - 0.004, 'round');
+          for (let j = 0; j < P.length; j++) if (j !== i && intersect(grown, [G[j]]).length) bad.push(`${pl.label} closer than the spacing to ${P[j].label}`);
+        }
+        const cfgS = { ...s0, ...tl, commonLine: cl, holdDown: hold, tabs: { ...s0.tabs, on: true }, thickness: g.thickness };
+        const tp = sheetToolpaths(sh, cfgS);
+        const res = simCheck(sh, carve(sh, tp.moves, { res: 0.04, dia: tl.tool.dia }), { dia: tl.dadoTool.dia, profileDia: tl.tool.dia, thickness: g.thickness, holdDown: hold });
+        if (!res.ok) bad.push(`${cl ? 'shared' : 'spaced'} ${hold}: ${res.uncut} uncut, ${res.deep} deep, ${res.notThrough} not through`);
+      }
+    }
+    check(!bad.length, `custom shapes (${grain} grain): ${shapes} placed, ${angled} at odd angles, ${sheetsWith} sheets (as rectangles: ${sheetsWithout})${bad.length ? ' - ' + [...new Set(bad)].slice(0, 4).join('; ') : ''}`);
+    if (grain === 'free') check(angled > 0, 'free-grain shapes do use odd angles');
+    check(!bad.some((b) => /dado turned over/.test(b)), 'a shape with a dado is never turned over');
+    if (grain === 'fixed') check(mirrored > 0, `shapes without dados get turned over when it helps (${mirrored})`);
+    check(sheetsWith <= sheetsWithout, 'fitting by outline never uses more sheets than nesting shapes as rectangles');
+  }
+  // the cabinet parts' own nest is untouched by shapes being present
+  const withShapes = groupParts(applyGrain(base.filter((p) => p.include)))[0];
+  const o = { ...s0.sheet, respectGrain: true, shapeStep: 15 };
+  const a = nestParts(cabinetOnly.parts, o), b = nestParts(withShapes.parts, o);
+  const cab = (n) => JSON.stringify(n.sheets.map((sh) => sh.placements.map((pl) => [pl.label, +pl.x.toFixed(4), +pl.y.toFixed(4), pl.rotated])));
+  check(cab(a) === cab(b), 'cabinet parts nest exactly the same with custom shapes in the job');
 }
 
 // --- merging identical parts: a half turn still merges, a mirror image never does ---

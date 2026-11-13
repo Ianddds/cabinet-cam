@@ -1,6 +1,7 @@
 // Printable sheet layouts for an ordinary printer: one page per sheet with the
 // layout drawn in black and white (part numbers matching the labels), and a
 // parts list. Paper size comes from the print dialog (landscape).
+import { labelPoint } from './shapes.js';
 import { placedGeometry } from './nest.js';
 import { numberPlacements } from './labels.js';
 import { fraction } from './cutlist.js';
@@ -37,7 +38,8 @@ export function layoutsHTML(pages, job) {
         svg += `<path d="${d}" fill="#bbb" fill-rule="evenodd"/>`;
       }
       const bw = g.box.x1 - g.box.x0, bh = g.box.y1 - g.box.y0;
-      const cx = (g.box.x0 + g.box.x1) / 2, cy = fy((g.box.y0 + g.box.y1) / 2);
+      const [lx, ly] = labelPoint(pl, g);
+      const cx = lx, cy = fy(ly);
       const big = Math.min(4, Math.max(1.2, Math.min(bw, bh) * 0.35));
       svg += `<text x="${cx}" y="${cy + big * 0.1}" font-size="${big}" font-weight="700" text-anchor="middle">#${nos.get(pl)}</text>`;
       if (bh > 5 && bw > 10) {

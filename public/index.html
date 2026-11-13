@@ -41,8 +41,10 @@
           <label class="field" title="Clean-up margin along the ends of the sheet (X = 0 and X = length). Blank = same as Edge trim.">End trim<input type="number" step="0.0625" min="0" placeholder="same" data-blank="null" data-path="sheet.endTrim" /></label>
           <label class="field" id="spacingF">Part spacing<input type="number" step="0.0625" data-path="sheet.spacing" /></label>
           <label class="field" title="How long Nest &amp; toolpath searches for a better layout. Each material searches side by side. 0 = quick nest only.">Nest search (sec)<input type="number" step="1" min="0" max="60" data-path="nestSeconds" /></label>
+          <label class="field" title="Custom parts that aren't rectangles nest by their actual outline, fitted in among the cabinet parts. Free-grain parts (no grain, or Any) turn in steps of this many degrees; grain along / across allows a half turn only. Cabinet parts are never turned this way. 0 = nest custom shapes as rectangles.">Custom shape rotation (°)<input type="number" step="1" min="0" max="180" data-path="shapeStep" /></label>
         </div>
         <label class="check"><input type="checkbox" data-path="respectGrain" /> Respect grain (sheet grain along X)</label>
+        <label class="check" title="Custom shapes with nothing cut into one face (no dados or pockets; through holes are fine) may be turned over to fit better. The grain still runs the same way; the other face ends up on top."><input type="checkbox" data-path="shapeFlip" /> Custom shapes can be turned over</label>
         <label class="check" title="Parts nest exactly one profile-bit width apart, and an edge two parts share is cut once (about a quarter less outline cutting). The nest search also looks for layouts that line edges up."><input type="checkbox" data-path="commonLine" /> Shared cut lines (parts one bit apart)</label>
       </section>
 

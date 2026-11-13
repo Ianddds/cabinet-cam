@@ -123,6 +123,16 @@ Order on each sheet: holes → dados/rabbets → inside cutouts → outlines (pe
 
 The winning layout is kept with the job (`nests`), so reopening a saved job, or changing settings that only affect toolpaths, gives exactly the same layout. If parts, quantities, grain, sheet size, trim or spacing change, a quick nest is shown until you click **Nest & toolpath** again. **Search again** tries from a different starting point and only replaces a layout with a better one. The summary shows the area minimum (total part area ÷ sheet) when the nest uses more sheets than that; grain locks usually account for the gap.
 
+### Custom shapes
+
+Custom parts (made with **Tag cabinet part** / **Cabinet extrude**, or not tagged) whose outline isn't a rectangle are nested by their **actual outline**, fitted in among the cabinet parts on the same sheets, and only start a new sheet when nothing fits. Cabinet parts, and custom parts that are plain rectangles, nest exactly as before (shared cut lines and all).
+
+- **Custom shape rotation (°)** (Sheet card, default 15): free-grain shapes (no grain, or grain set to *Any*) turn in steps of this many degrees. Grain along the part allows a half turn (0° / 180°), grain across it 90° / 270°: the grain still runs along the sheet. **0** = nest custom shapes as rectangles, as before.
+- **Custom shapes can be turned over** (default on): a shape with nothing cut into one face (no dados or pockets; through holes are fine) may also be flipped, which doesn't change the way its grain runs. The other face ends up on top.
+- Shapes never share cut lines: they keep the normal **Part spacing** from everything, even with shared cut lines on (a dado running off a shape's edge needs the room).
+- The same job always gives the same layout. Several part orders are tried and the one with the fewest sheets and the shortest run of shapes wins. Kept offcuts are trimmed around the shapes.
+- On the sheet a turned shape shows "turned 30°" or "turned over" next to its size. Labels sit in the middle of the shape.
+
 ## Remnants
 
 Offcuts become stock for later jobs. The rack is shared by everyone using the app (`data/remnants.json`), listed in the **Remnants** card by material.

@@ -9,6 +9,7 @@
 // Best = fewest sheets, then the largest single rectangular offcut on the last
 // sheet (a usable remnant beats scattered slivers). While searching, ties on
 // sheet count go to the emptiest last sheet, which is what leads to a sheet fewer.
+import { isShapePart } from './shapes.js';
 import { rotate90, translate } from './geometry.js';
 
 export const RULES = ['bssf', 'blsf', 'baf', 'bl', 'cp'];
@@ -134,6 +135,7 @@ function makeItems(parts, opts) {
   const pad = opts.commonLine ? opts.exitPad || 0 : 0;
   for (const p of parts) {
     if (!p.include) continue;
+    if (isShapePart(p, opts)) continue;   // custom shapes: fitted by outline afterwards (shapes.js)
     const ex = pad ? partExits(p) : { x: false, y: false };
     const px = ex.x ? pad : 0, py = ex.y ? pad : 0;
     for (let i = 0; i < (p.qty || 1); i++) {
@@ -697,6 +699,14 @@ function finish(res, opts) {
 // Part geometry in sheet coordinates for a placement.
 export function placedGeometry(pl) {
   const p = pl.part;
+  if (pl.xf) {
+    // a custom shape at any angle: sheet point = turn(part point) + (tx, ty)
+    // (turned over first if xf.m: y -> -y, loops reversed to keep their winding)
+    const a = (pl.xf.a * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a), m = pl.xf.m ? -1 : 1;
+    const tf = (pts) => { const q = pts.map(([x, y]) => [c * x - s * m * y + pl.xf.tx, s * x + c * m * y + pl.xf.ty]); return pl.xf.m ? q.reverse() : q; };
+    const pockets = p.pockets.map((q) => ({ loops: q.loops.map(tf), depth: q.depth, ...(q.walls ? { walls: q.walls.map((wl) => ({ ...wl, seg: tf(wl.seg) })) } : {}) }));
+    return { outline: tf(p.outline), holes: p.holes.map(tf), pockets, box: { ...pl.box } };
+  }
   const xf = (pts) => translate(pl.rotated ? rotate90(pts, p.width) : pts, pl.x, pl.y);
   const pockets = p.pockets.map((q) => ({ loops: q.loops.map(xf), depth: q.depth, ...(q.walls ? { walls: q.walls.map((wl) => ({ ...wl, seg: xf(wl.seg) })) } : {}) }));
   const w = pl.rotated ? p.height : p.width, h = pl.rotated ? p.width : p.height;

@@ -1,6 +1,7 @@
 import { DEFAULT_SETTINGS, groupParts, mergeSettings, holdDownOf, usesSkin, usesTabs } from './lib/settings.js';
 import { carve, check, shade } from './lib/sim.js';
 import { nestParts, applySolution, nestKey, placedGeometry, partExits, rectMinus } from './lib/nest.js';
+import { placeShapes, isShapePart, labelPoint } from './lib/shapes.js';
 import { sheetToolpaths, screwR, rectsOutline, screwCheck } from './lib/toolpath.js';
 import { post, postWithWarnings, fileExtension, SBP_MAX_TOOL, toolNumberOk } from './lib/post.js';
 import { parsePP } from './lib/vpp.js';
@@ -445,7 +446,7 @@ const stockSig = (list) => (list || []).map((r) => r.id).sort().join(',');
 function nestGroups() {
   const s = job.settings;
   const rs = s.remnants || {};
-  const base = { ...s.sheet, respectGrain: s.respectGrain, remnantTrim: rs.trim ?? 0.25, remnantMin: { side: rs.minSide ?? 8, area: rs.minArea ?? 288 } };
+  const base = { ...s.sheet, respectGrain: s.respectGrain, shapeStep: s.shapeStep ?? 15, shapeFlip: s.shapeFlip !== false, shapeSpacing: s.sheet.spacing, remnantTrim: rs.trim ?? 0.25, remnantMin: { side: rs.minSide ?? 8, area: rs.minArea ?? 288 } };
   // shared cut lines: parts sit exactly the profile bit apart, so facing edges are one cut
   if (s.commonLine) { base.spacing = resolveTools(s, library, job.toolSnapshot || []).tool.dia; base.commonLine = true; }
   // screw hold-downs: one near each corner of the parts' area and one at its centre
@@ -459,8 +460,24 @@ function nestGroups() {
   });
 }
 
+// Custom shapes fitted by outline into a nest (kept per nest, as the fitting
+// takes a moment and the page redraws often)
+const shapeMemo = new Map();
+function shapesFor(nest, g, nestOpts) {
+  const shapes = g.parts.filter((p) => p.include && p.qty > 0 && isShapePart(p, nestOpts));
+  if (!shapes.length) return nest;
+  const key = JSON.stringify([nest.sheets.map((s) => [s.w, s.h, s.placements.map((pl) => [pl.part.id ?? pl.part.name, +pl.x.toFixed(3), +pl.y.toFixed(3), pl.rotated ? 1 : 0]), (s.screws || []).map((q) => [+q.x.toFixed(2), +q.y.toFixed(2)])]), shapes.map((p) => [p.id, p.name, p.qty, p.grain, p.width, p.height]), nestOpts.shapeStep, nestOpts.shapeFlip, nestOpts.respectGrain, nestOpts.spacing, nestOpts.sheetW, nestOpts.sheetH, nestOpts.trim, nestOpts.endTrim, nestOpts.screws]);
+  // same layout as last time: reuse where the shapes went, with today's part objects
+  const hit = shapeMemo.get(key);
+  if (hit) return placeShapes(nest, g.parts, nestOpts, hit.spots);
+  const out = placeShapes(nest, g.parts, nestOpts);
+  shapeMemo.set(key, { spots: out.spots });
+  if (shapeMemo.size > 40) shapeMemo.delete(shapeMemo.keys().next().value);
+  return out;
+}
+
 // what a worker needs of a part
-const slimPart = (p) => ({ id: p.id, name: p.name, width: p.width, height: p.height, qty: p.qty, include: p.include, grain: p.grain, exits: partExits(p) });
+const slimPart = (p) => ({ id: p.id, name: p.name, width: p.width, height: p.height, qty: p.qty, include: p.include, grain: p.grain, exits: partExits(p), shape: isShapePart(p, { shapeStep: job.settings.shapeStep ?? 15 }) });
 
 function searchGroup({ g, nestOpts }, seed, onProgress) {
   return new Promise((resolve, reject) => {
@@ -539,6 +556,7 @@ function runNest() {
       else if (nest && stockSig(kept.stock) !== stockSig(stock) && !job.cut) stockNotes.push(`${g.key}: the remnants on the rack changed — Nest & toolpath will look at them`);
     }
     if (!nest) { nest = nestParts(g.parts, nestOpts); quick = true; }
+    nest = shapesFor(nest, g, nestOpts);
     const cfg = { ...s, ...tl, thickness: g.thickness, ...(postPP(s) ? { pp: postPP(s) } : {}) };
     const mat = g.material.replace(/[^\w-]+/g, '_');
     const mkey = manualKey(key, kept);
@@ -685,6 +703,12 @@ $('#downloadAll').onclick = async () => {
 // Grain on the sheet: length grain runs along the part's long side (part X).
 function grainMark(pl) {
   const g = pl.part.grainEffective ?? pl.part.grain;
+  if (pl.xf) {
+    // a custom shape at an angle: show the turn (and the grain if it has one)
+    const turn = ((pl.angle % 360) + 360) % 360;
+    if (pl.mirror) return ` · turned over${turn ? `, ${+turn.toFixed(1)}°` : ''}${g === 'none' || g === 'any' ? '' : ' (grain ' + ((g === 'width') === (turn % 180 === 0) ? '↕' : '↔') + ')'}`;
+    return turn ? ` · turned ${+turn.toFixed(1)}°${g === 'none' || g === 'any' ? '' : ' (grain ' + ((g === 'width') === (turn % 180 === 0) ? '↕' : '↔') + ')'}` : (g === 'none' ? '' : ' · grain ' + (g === 'width' ? '↕' : '↔'));
+  }
   if (g === 'none') return '';
   const alongPartX = g !== 'width';
   const alongSheetX = alongPartX !== !!pl.rotated;
@@ -722,8 +746,9 @@ function renderSheet(item) {
       const d = q.loops.map((l) => 'M' + flip(l).map(([x, y]) => `${x.toFixed(3)} ${y.toFixed(3)}`).join('L') + 'Z').join('');
       svg += `<path class="pocket" fill-rule="evenodd" d="${d}"><title>dado ${f3(q.depth)} deep</title></path>`;
     }
-    const cx = (g.box.x0 + g.box.x1) / 2, cy = fy((g.box.y0 + g.box.y1) / 2);
-    const small = Math.min(g.box.x1 - g.box.x0, g.box.y1 - g.box.y0) < 6;
+    const [lx, ly] = labelPoint(pl, g);
+    const cx = lx, cy = fy(ly);
+    const small = Math.min(g.box.x1 - g.box.x0, g.box.y1 - g.box.y0) < 6 || !!pl.xf;
     svg += `<text class="label" x="${cx}" y="${cy}" text-anchor="middle" ${small ? 'font-size="0.8"' : ''}>${esc(pl.label || pl.part.name)}</text>`;
     svg += `<text class="label sub" x="${cx}" y="${cy + 1.3}" text-anchor="middle">${f3(pl.part.width)} × ${f3(pl.part.height)}${grainMark(pl)}</text>`;
     svg += `<text class="partno" x="${g.box.x0 + 0.5}" y="${fy(g.box.y1) + 1.6}">#${partNo.get(pl)}</text>`;

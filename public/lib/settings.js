@@ -4,6 +4,10 @@ export const DEFAULT_SETTINGS = {
   // and x = sheetW), null = same as trim
   sheet: { sheetW: 96, sheetH: 48, trim: 0.5, endTrim: null, spacing: 0.45 },
   respectGrain: true,
+  // custom parts that aren't rectangles nest by their outline, turned in steps
+  // of this many degrees where their grain allows (0 = nest them as rectangles)
+  shapeStep: 15,
+  shapeFlip: true,     // ...and may be turned over if nothing is cut into one face (no dados / pockets)
   nestSeconds: 6,
   // remnants: use them in nests; trim = clean-up margin around one; offcuts are
   // kept only when both sides >= minSide and the area >= minArea (sq in)
