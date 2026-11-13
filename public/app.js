@@ -460,20 +460,42 @@ function nestGroups() {
   });
 }
 
-// Custom shapes fitted by outline into a nest (kept per nest, as the fitting
-// takes a moment and the page redraws often)
-const shapeMemo = new Map();
+// Custom shapes fitted by outline into a nest. The fitting runs in a worker
+// (shape-worker.js) so the window never freezes; until it's back the sheets
+// show without them (downloads held). Where each shape went is kept per layout,
+// and the sheets are laid out again from that, which is quick.
+const shapeMemo = new Map();      // layout key -> { spots } | { error }
+const shapePending = new Set();   // layout keys being fitted now
+let shapeWorker = null, shapeJob = 0;
 function shapesFor(nest, g, nestOpts) {
   const shapes = g.parts.filter((p) => p.include && p.qty > 0 && isShapePart(p, nestOpts));
-  if (!shapes.length) return nest;
-  const key = JSON.stringify([nest.sheets.map((s) => [s.w, s.h, s.placements.map((pl) => [pl.part.id ?? pl.part.name, +pl.x.toFixed(3), +pl.y.toFixed(3), pl.rotated ? 1 : 0]), (s.screws || []).map((q) => [+q.x.toFixed(2), +q.y.toFixed(2)])]), shapes.map((p) => [p.id, p.name, p.qty, p.grain, p.width, p.height]), nestOpts.shapeStep, nestOpts.shapeFlip, nestOpts.respectGrain, nestOpts.spacing, nestOpts.sheetW, nestOpts.sheetH, nestOpts.trim, nestOpts.endTrim, nestOpts.screws]);
-  // same layout as last time: reuse where the shapes went, with today's part objects
+  if (!shapes.length) return { nest, pending: 0 };
+  const key = JSON.stringify([
+    nest.sheets.map((s) => [s.w, s.h, s.placements.map((pl) => [pl.part.id ?? pl.part.name, +pl.x.toFixed(3), +pl.y.toFixed(3), pl.rotated ? 1 : 0]), (s.screws || []).map((q) => [+q.x.toFixed(2), +q.y.toFixed(2)])]),
+    shapes.map((p) => [p.id, p.name, p.qty, p.grain, p.width, p.height, p.pockets.length, strHash(JSON.stringify(p.outline))]),
+    nestOpts.shapeStep, nestOpts.shapeFlip, nestOpts.shapeSpacing, nestOpts.respectGrain, nestOpts.spacing, nestOpts.sheetW, nestOpts.sheetH, nestOpts.trim, nestOpts.endTrim, nestOpts.screws, nestOpts.commonLine]);
   const hit = shapeMemo.get(key);
-  if (hit) return placeShapes(nest, g.parts, nestOpts, hit.spots);
-  const out = placeShapes(nest, g.parts, nestOpts);
-  shapeMemo.set(key, { spots: out.spots });
-  if (shapeMemo.size > 40) shapeMemo.delete(shapeMemo.keys().next().value);
-  return out;
+  if (hit?.spots) return { nest: placeShapes(nest, g.parts, nestOpts, hit.spots), pending: 0 };
+  if (hit?.error) return { nest: { ...nest, unplaced: [...(nest.unplaced || []), ...shapes.map((p) => ({ name: p.name, reason: `custom shape fitting failed (${hit.error})` }))] }, pending: 0 };
+  if (!shapePending.has(key)) {
+    shapePending.add(key);
+    // what the worker needs: the sheets as they are, and the shapes
+    const slimNest = { unplaced: [], sheets: nest.sheets.map((s) => ({ w: s.w, h: s.h, trim: s.trim, trimX: s.trimX, remnant: s.remnant ? { rects: s.remnant.rects } : null, screws: s.screws || [], offcuts: [], placements: s.placements.map((pl) => ({ x: pl.x, y: pl.y, rotated: pl.rotated, part: { width: pl.part.width, height: pl.part.height } })) })) };
+    const slimShapes = shapes.map((p) => ({ id: p.id, name: p.name, width: p.width, height: p.height, qty: p.qty, include: true, grain: p.grain, custom: true, shape: true, outline: p.outline, pockets: p.pockets.map(() => 0) }));
+    shapeWorker ??= new Worker(new URL('./lib/shape-worker.js', import.meta.url), { type: 'module' });
+    const id = ++shapeJob;
+    const done = (e) => {
+      if (e.data?.id !== id) return;
+      shapeWorker.removeEventListener('message', done);
+      shapePending.delete(key);
+      shapeMemo.set(key, e.data.error ? { error: e.data.error } : { spots: e.data.spots });
+      if (shapeMemo.size > 40) shapeMemo.delete(shapeMemo.keys().next().value);
+      if (results.length) runNest();   // lay the sheets out again, now with the shapes
+    };
+    shapeWorker.addEventListener('message', done);
+    shapeWorker.postMessage({ id, nest: slimNest, parts: slimShapes, opts: nestOpts });
+  }
+  return { nest, pending: shapes.reduce((a, p) => a + p.qty, 0) };
 }
 
 // what a worker needs of a part
@@ -543,6 +565,7 @@ function runNest() {
   const ext = fileExtension({ ...s, pp: postPP(s) });
   const stamp = (job.name || 'job').replace(/[^\w-]+/g, '_').slice(0, 40);
   let quick = false;
+  let pendingShapes = 0;
   const stockNotes = [];
   for (const { g, nestOpts, key, stock } of nestGroups()) {
     const kept = job.nests?.[key];
@@ -556,7 +579,9 @@ function runNest() {
       else if (nest && stockSig(kept.stock) !== stockSig(stock) && !job.cut) stockNotes.push(`${g.key}: the remnants on the rack changed — Nest & toolpath will look at them`);
     }
     if (!nest) { nest = nestParts(g.parts, nestOpts); quick = true; }
-    nest = shapesFor(nest, g, nestOpts);
+    const sf = shapesFor(nest, g, nestOpts);
+    nest = sf.nest;
+    pendingShapes += sf.pending;
     const cfg = { ...s, ...tl, thickness: g.thickness, ...(postPP(s) ? { pp: postPP(s) } : {}) };
     const mat = g.material.replace(/[^\w-]+/g, '_');
     const mkey = manualKey(key, kept);
@@ -577,6 +602,7 @@ function runNest() {
     results.push({ group: g, sheets, unplaced: nest.unplaced, lowerBound: nest.stats?.lowerBound });
   }
   results.quick = quick;
+  results.pendingShapes = pendingShapes;
   const all = results.flatMap((r) => r.sheets);
   activeSheet = Math.min(activeSheet, Math.max(0, all.length - 1));
   const warnings = [...problems, ...stockNotes, ...new Set(all.flatMap((x) => x.tp.warnings))];
@@ -584,6 +610,7 @@ function runNest() {
   showMessages([
     { error: true, text: unplaced.length ? 'Not placed:' : '', items: unplaced },
     { text: warnings.length ? 'Check before cutting:' : '', items: warnings },
+    { text: pendingShapes ? `Fitting ${pendingShapes} custom shape${pendingShapes === 1 ? '' : 's'} in among the parts… the sheets update when it's done (downloads wait till then).` : '', items: [] },
   ]);
   renderResults();
 }
@@ -659,6 +686,9 @@ function renderResults() {
     (keepN ? ` · ${keepN} offcut${keepN === 1 ? '' : 's'} to keep` : '') +
     (results.quick ? ' · quick nest: click Nest & toolpath to search for a better one' : '');
   renderCutState();
+  // custom shapes still being fitted: nothing to download or mark cut yet
+  $('#downloadAll').disabled = !!results.pendingShapes;
+  $('#markCut').disabled = !!results.pendingShapes && !job.cut;
   $('#sheetTabs').innerHTML = all.map((x, i) => {
     const n = results.find((r) => r.sheets.includes(x));
     const fulls = n.sheets.filter((y) => !y.sheet.remnant);
@@ -806,7 +836,7 @@ function renderSheet(item) {
       <span class="legend"><span><i style="background:var(--path)"></i>cut</span><span><i style="background:var(--rapid)"></i>rapid</span><span><i style="background:var(--pocket)"></i>dado</span><span><i style="background:var(--drill)"></i>drill</span>${usesTabs(item.cfg) ? '<span><i style="background:var(--tab)"></i>tab</span>' : ''}</span>
       <button id="screwEditBtn" class="${screwEdit ? 'active' : ''}" title="Place hold-down screws by hand on this sheet: click to add, drag to move, right-click to remove">${screwEdit ? 'Done placing screws' : 'Place screws'}</button>
       <button id="printSheet">Print layout</button>
-      <button id="dlSheet" class="primary">Download ${esc(item.file)}</button>
+      <button id="dlSheet" class="primary" ${results.pendingShapes ? 'disabled title="Custom shapes are still being fitted"' : ''}>Download ${esc(item.file)}</button>
     </div>${svg}
     ${simNote}
     ${screwEdit ? `<p class="small screw-help">Placing screws: click an empty spot to add one, drag to move, right-click to remove. Red = a cut or part is too close. ${sh.screws?.length || 0} on this sheet${sh.screwsManual ? ' (placed by hand)' : ''}. <button id="screwAuto" ${sh.screwsManual ? '' : 'disabled'}>Back to automatic</button> <button id="screwClear" ${sh.screws?.length ? '' : 'disabled'}>Remove all</button></p>` : ''}
