@@ -2,6 +2,7 @@
 // (holes before outlines, smallest parts first), with optional onion skin.
 // Z is relative to the material top (0 = top, negative = into the material);
 // the post-processor shifts it if the machine is zeroed on the table.
+import { stepoverOf } from './tools.js';
 import { placedGeometry } from './nest.js';
 import { ensureCCW, ensureCW, bbox, signedArea, pointInPolygon } from './geometry.js';
 import { offset, union, intersect, difference, inRegion, area } from './clip.js';
@@ -498,7 +499,7 @@ function wallLapPath(R0, pos, plunges, inside) {
 // 'rings' (the middle line once, then each ring lapped, inside out)
 function spiralPlan(allowed, tool, plunges, climb, style = 'spiral', fromTip = 0) {
   const r = tool.dia / 2;
-  const step = Math.max(tool.dia * (tool.stepover || 0.5), tool.dia * 0.85);
+  const step = tool.dia * stepoverOf(tool);   // as typed in the tool library
   const keep = (ls) => ls.filter((l) => area([l]) > 1e-7);
   const inset = (d) => (d <= 0 ? keep(allowed) : keep(offset(allowed, -d, 'round')));
   // how deep the region goes (largest inset that leaves something)
@@ -778,7 +779,7 @@ const distToPoly = (p, pts, closed) => {
 function planGroup(pockets, g, tool, warnings, label, opts) {
   const r = tool.dia / 2;
   const ext = opts.overtravel ?? r + 0.02;
-  const legStep = Math.max(tool.dia * (tool.stepover || 0.5), tool.dia * 0.85);
+  const legStep = tool.dia * stepoverOf(tool);   // as typed in the tool library
   const regions = pockets.map((p) => union(p.loops, []));
   const all = union(regions.flat(), [], 'nonzero');
   const fb = bbox(all.flat());

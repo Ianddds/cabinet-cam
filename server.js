@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DATA_DIR, dataPath } from './lib/paths.js';
 import * as onshape from './lib/onshape.js';
 import { normalizeAll } from './lib/parts.js';
-import { DEFAULT_LIBRARY } from './public/lib/tools.js';
+import { DEFAULT_LIBRARY, OLD_DEFAULT_STEPOVER, STEPOVER_DEFAULT } from './public/lib/tools.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const JOBS = dataPath('jobs');
@@ -144,7 +144,29 @@ app.delete('/api/posts/:file', wrap(async (req, res) => {
 // ---------- tool library ----------
 const TOOLS = dataPath('tools.json');
 const readTools = () => {
-  try { return JSON.parse(fs.readFileSync(TOOLS, 'utf8')); } catch { return structuredClone(DEFAULT_LIBRARY); }
+  let list;
+  try { list = JSON.parse(fs.readFileSync(TOOLS, 'utf8')); } catch { return structuredClone(DEFAULT_LIBRARY); }
+  // Once: pocket stepover used to be at least 0.85 whatever the library said, and
+  // is now used as typed. Built-in bits still on their old default go to 0.85 so
+  // pockets cut as before; a value someone typed is kept.
+  const marker = dataPath('.stepover-as-typed');
+  if (!fs.existsSync(marker)) {
+    let changed = 0;
+    for (const t of list) {
+      // built-in bits on their old default; added / duplicated bits on 0.45,
+      // which a new bit was given automatically (copied from the 3/8 compression)
+      const old = OLD_DEFAULT_STEPOVER[t?.id] ?? 0.45;
+      if (t && Math.abs((t.stepover ?? 0) - old) < 1e-9) {
+        t.stepover = STEPOVER_DEFAULT;
+        changed++;
+      }
+    }
+    try {
+      if (changed) fs.writeFileSync(TOOLS, JSON.stringify(list, null, 2));
+      fs.writeFileSync(marker, `stepover ${STEPOVER_DEFAULT} for ${changed} bit(s) left on their old default\n`);
+    } catch { /* read-only data folder: the change is in memory only */ }
+  }
+  return list;
 };
 app.get('/api/tools', (req, res) => res.json(readTools()));
 app.put('/api/tools', wrap(async (req, res) => {
