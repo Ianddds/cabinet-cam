@@ -1011,6 +1011,19 @@ for (const g of groupParts(parts)) {
   const rows = res.parts.map((p) => `${p.qty}:${p.sourceNames.join('+')}`).sort();
   check(res.parts.length === 2 && res.parts.some((p) => p.qty === 2), `half-turned twin merges, mirror image stays its own row (${rows.join(', ')})`);
 }
+{
+  // sides with a dado and an end rabbet that meet in one L-shaped pocket: the
+  // mirror image has the same pocket bounding box and area, but isn't the same part
+  const out = [[0, 0], [30, 0], [30, 12], [0, 12]];
+  // bottom dado across the depth at x 4..4.75; back rabbet along the rear edge
+  // (y 11.5..12) from the top down to the dado; the right side is the mirror image
+  const L = [[4, 0], [4.75, 0], [4.75, 11.5], [30, 11.5], [30, 12], [4, 12]];
+  const Lm = L.map(([x, y]) => [x, 12 - y]).reverse();
+  const mk = (name, poly) => rawPart(name, out, 0.75, [{ poly, depth: 0.25 }], { role: 'SIDE' });
+  const res = normalizeAll([mk('Side L', L), mk('Side R', Lm), mk('Side L2', L)]);
+  const rows = res.parts.map((p) => `${p.qty}:${p.sourceNames.join('+')}`).sort();
+  check(res.parts.length === 2 && res.parts.some((p) => p.qty === 2 && p.sourceNames.includes('Side L2')), `mirrored L-shaped pocket (dado meeting a rabbet) stays its own row (${rows.join(', ')})`);
+}
 
 // --- separate end trim: parts stay endTrim from the ends (X) and trim from the long edges (Y) ---
 {
