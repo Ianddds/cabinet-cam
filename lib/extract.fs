@@ -14,20 +14,32 @@
 // All lengths are returned in meters as plain numbers.
 function(context is Context, queries is map)
 {
+    // tie-break for equal faces: a skew direction no cabinet face is square to
+    const TIE_DIRECTION = normalize(vector(0.31, 0.57, 0.76));
+    const AREA_TIE = 1e-5;
     var result = [];
     for (var part in evaluateQuery(context, qAllModifiableSolidBodies()))
     {
         const planar = evaluateQuery(context, qGeometry(qOwnedByBody(part, EntityType.FACE), GeometryType.PLANE));
 
+        // Largest face. Two faces the same size (a part with only through cuts, or
+        // the halves of a part split in Onshape) are decided by which way they face
+        // in the model, not by the order Onshape lists them, so parts lying the
+        // same way in the model come out the same side up.
         var main = undefined;
         var mainArea = 0 * meter ^ 2;
+        var mainScore = -2;
         for (var f in planar)
         {
             const a = evArea(context, { "entities" : f });
-            if (a > mainArea)
+            const score = dot(evPlane(context, { "face" : f }).normal, TIE_DIRECTION);
+            const bigger = a > mainArea * (1 + AREA_TIE);
+            const same = !bigger && a >= mainArea * (1 - AREA_TIE);
+            if (bigger || (same && score > mainScore))
             {
                 mainArea = a;
                 main = f;
+                mainScore = score;
             }
         }
         if (main == undefined)
