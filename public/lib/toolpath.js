@@ -73,8 +73,14 @@ class PathBuilder {
   }
   // Short move inside one pocket: lift just clear of the material top, move
   // over at that height, plunge. Never drags the tool sideways through stock.
+  // height for a hop between cuts on one part: Hop height (at least 0.05",
+  // never above safe Z); 0 = always safe Z
+  hopHeight() {
+    const h = this.hopZ ?? 0.1;
+    return h > 0 ? Math.min(Math.max(h, 0.05), this.safeZ) : this.safeZ;
+  }
   hopTo(x, y, z) {
-    const clear = 0.05;
+    const clear = this.hopHeight();
     if (this.x == null) { this.startAt(x, y, z); return; }
     if (this.z < clear) this.rapidZ(clear);
     this.moves.push({ g: 0, x, y, z: this.z });
@@ -1700,7 +1706,7 @@ export function sheetToolpaths(sheet, cfg) {
         if (got < 0.02 || dz / got > Math.tan((Math.min(80, rampAngle + 1) * Math.PI) / 180)) return false;   // no room for the ramp: plunge
         const R = pts[pts.length - 1];
         if (mode === 'start') { P.rapidTo(R[0], R[1], real ? lowTo(pl.pi)(R) : false); if (P.z > zTop + 0.05) P.rapidZ(zTop + 0.05); }
-        else if (mode === 'hop') { if (P.z < 0.05) P.rapidZ(0.05); P.moves.push({ g: 0, x: R[0], y: R[1], z: P.z }); P.x = R[0]; P.y = R[1]; if (P.z > zTop + 0.05) P.rapidZ(zTop + 0.05); }
+        else if (mode === 'hop') { const hh = P.hopHeight(); if (P.z < hh) P.rapidZ(hh); P.moves.push({ g: 0, x: R[0], y: R[1], z: P.z }); P.x = R[0]; P.y = R[1]; if (P.z > zTop + 0.05) P.rapidZ(zTop + 0.05); }
         else { for (let k = 1; k < pts.length; k++) P.feed(pts[k][0], pts[k][1], dado.feed); }   // 'here': along floor the last level cleared
         // down the ramp, never faster in Z than the bit's plunge rate
         const z0 = mode === 'here' ? P.z : zTop + 0.02;
@@ -1803,6 +1809,7 @@ export function sheetToolpaths(sheet, cfg) {
     const key = `${pl.id}|${k}`;
     if (!exitMemo.has(key)) {
       const dry = new PathBuilder(cfg.safeZ);
+      dry.hopZ = cfg.hopZ ?? 0.1;
       dry.x = st[k][0]; dry.y = st[k][1];
       const keep = curPart;
       const po = planOrder(pl, st[k]);
@@ -1823,6 +1830,7 @@ export function sheetToolpaths(sheet, cfg) {
     const key = `${pl.id}|${ci}|${start[0].toFixed(3)},${start[1].toFixed(3)}`;
     if (!classExit.has(key)) {
       const dry = new PathBuilder(cfg.safeZ);
+      dry.hopZ = cfg.hopZ ?? 0.1;
       dry.x = start[0]; dry.y = start[1];
       const keep = curPart;
       const st = []; st[ci] = start;
