@@ -1069,6 +1069,30 @@ for (const g of groupParts(parts)) {
   check(cab(a) === cab(b), 'cabinet parts nest exactly the same with custom shapes in the job');
 }
 
+// --- curved custom shapes (arcs as many short segments), turned and turned over:
+// never closer than the spacing, and quick ---
+{
+  const arcPts = (cx, cy, r, a0, a1, n) => Array.from({ length: n + 1 }, (_, i) => { const a = a0 + ((a1 - a0) * i) / n; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; });
+  const norm = (pts) => { const mx = Math.min(...pts.map((q) => q[0])), my = Math.min(...pts.map((q) => q[1])); const o = pts.map(([x, y]) => [x - mx, y - my]); return { outline: o, width: Math.max(...o.map((q) => q[0])), height: Math.max(...o.map((q) => q[1])) }; };
+  const mk = (name, pts, qty) => ({ id: name, name, custom: true, include: true, qty, grain: 'none', holes: [], pockets: [], ...norm(pts) });
+  const parts = [
+    mk('Corbel', [[0, 0], [12, 0], [12, 2], ...arcPts(12, 14, 12, -Math.PI / 2, -Math.PI, 120).slice(1)], 8),
+    mk('Arch', [[0, 0], [24, 0], [24, 8], ...arcPts(12, 8, 12, 0, Math.PI, 160).slice(1)], 4),
+    mk('Blob', arcPts(8, 6, 6, 0, 2 * Math.PI, 200).slice(0, -1).map(([x, y], i) => [x * (1 + 0.15 * Math.sin(i / 7)), y]), 6),
+  ];
+  const t0 = Date.now();
+  const res = placeShapes({ sheets: [], unplaced: [] }, parts, { sheetW: 96, sheetH: 48, trim: 0.5, spacing: 0.45, respectGrain: true, shapeStep: 45, shapeFlip: true });
+  const ms = Date.now() - t0;
+  let close = 0, flipped = 0, n = 0;
+  for (const sh of res.sheets) {
+    const G = sh.placements.map((pl) => placedGeometry(pl).outline);
+    flipped += sh.placements.filter((pl) => pl.mirror).length; n += G.length;
+    for (let i = 0; i < G.length; i++) { const gi = offset([G[i]], 0.45 - 0.004, 'round'); for (let j = i + 1; j < G.length; j++) if (intersect(gi, [G[j]]).length) close++; }
+  }
+  check(n === 18 && close === 0, `curved shapes at 45° (turned over too): ${n} placed, ${flipped} turned over, ${close} too close`);
+  check(ms < 30000, `curved shapes fit in reasonable time (${(ms / 1000).toFixed(1)} s)`);
+}
+
 // --- merging identical parts: a half turn still merges, a mirror image never does ---
 {
   // a back with a notch at one bottom corner, its half-turned twin, and its mirror image

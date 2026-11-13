@@ -486,6 +486,13 @@ function shapesFor(nest, g, nestOpts) {
     const id = ++shapeJob;
     const done = (e) => {
       if (e.data?.id !== id) return;
+      if (e.data.progress) {
+        // show how far it's got in the note
+        const { pass, passes, part, parts } = e.data.progress;
+        const m = [...document.querySelectorAll('#messages .msg')].find((x) => /Fitting \d+ custom shape/.test(x.textContent));
+        if (m) m.textContent = m.textContent.replace(/ \(try [^)]*\)|$/, ` (try ${pass} of ${passes}, part ${part} of ${parts})`).replace(/\) \(try/, ') (try');
+        return;
+      }
       shapeWorker.removeEventListener('message', done);
       shapePending.delete(key);
       shapeMemo.set(key, e.data.error ? { error: e.data.error } : { spots: e.data.spots });

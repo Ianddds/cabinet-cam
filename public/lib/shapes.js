@@ -16,9 +16,15 @@
 // off) turn in steps of opts.shapeStep degrees.
 
 const SCALE = 1e4;          // Clipper works in integers: 0.0001"
-const SIMPLIFY = 0.004;     // outlines are thinned to this (inch) for fitting...
+// For fitting, a curved outline is grown outward a little and thinned to about
+// FIT_POINTS points (arcs arrive as hundreds of short segments, and the fitting
+// cost goes with points x points). Grown first, the thinned outline stays
+// outside the real one, so parts are never closer than the spacing; the cost is
+// up to 2 x the tolerance of extra gap beside curves. Cutting uses the real outline.
+const FIT_POINTS = 24;
+const FIT_TOL_MIN = 0.004, FIT_TOL_MAX = 0.05;   // inch
 const SHUFFLES = 5;        // extra fixed shuffles of the order tried, besides the sorted ones
-const SLACK = 0.01;         // ...so obstacles grow this much more than the spacing (both outlines thinned)
+const SLACK = 0.002;        // obstacles grow this much more than the spacing (rounding)
 
 const L = () => {
   const c = globalThis.ClipperLib;
@@ -86,21 +92,56 @@ function thin(pts, tol) {
   return out.length >= 3 ? out : pts;
 }
 
+// The outline to fit with: as is when it's simple; otherwise grown by a
+// tolerance and thinned within it (so it stays outside the real outline), the
+// tolerance doubling until it's down to about FIT_POINTS points.
+function fitOutline(pts) {
+  if (pts.length <= FIT_POINTS) return pts;
+  const C = L();
+  let best = null;
+  for (let tol = FIT_TOL_MIN; tol <= FIT_TOL_MAX + 1e-9; tol *= 2) {
+    const co = new C.ClipperOffset(2, (tol / 4) * SCALE);
+    co.AddPath(toPath(pts), C.JoinType.jtRound, C.EndType.etClosedPolygon);
+    const out = new C.Paths();
+    co.Execute(out, tol * SCALE);
+    if (!out.length) break;
+    const outer = out.reduce((a, b) => (Math.abs(C.Clipper.Area(b)) > Math.abs(C.Clipper.Area(a)) ? b : a));
+    best = thin(fromPath(outer), tol);
+    if (best.length <= FIT_POINTS) break;
+  }
+  return best && best.length >= 3 ? best : pts;
+}
+
 // The part (turned over first if mirror: y -> -y, which keeps the grain along
 // X) turned `deg` degrees and moved so its bounding box starts at 0,0.
 // { pts, w, h, minx, miny } (pts are the thinned outline, for fitting)
-function turned(part, deg, mirror = false) {
+function turned(part, deg, mirror, raw) {
   const a = (deg * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
   const src = mirror ? part.outline.map(([x, y]) => [x, -y]).reverse() : part.outline;   // reversed: same winding
   const r = src.map(([x, y]) => [c * x - s * y, s * x + c * y]);
   let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
   for (const [x, y] of r) { minx = Math.min(minx, x); miny = Math.min(miny, y); maxx = Math.max(maxx, x); maxy = Math.max(maxy, y); }
-  const pts = thin(r.map(([x, y]) => [x - minx, y - miny]), SIMPLIFY);
+  // the fitting outline is thinned once per part and side, then turned
+  const pts = raw.map(([x, y]) => [c * x - s * y - minx, s * x + c * y - miny]);
   return { pts, w: maxx - minx, h: maxy - miny, minx, miny };
 }
 
+// A part's fitting outline in its own coordinates (turned over if mirror),
+// thinned once: { pts, grown(d) } (grown cached per distance).
+function rawOf(cache, part, mirror) {
+  const k = `${uidOf(cache, part)}${mirror ? 'm' : ''}`;
+  let r = cache.raw.get(k);
+  if (!r) {
+    const src = mirror ? part.outline.map(([x, y]) => [x, -y]).reverse() : part.outline;
+    r = { pts: fitOutline(src), grownBy: new Map() };
+    r.grown = (d) => { if (!r.grownBy.has(d)) r.grownBy.set(d, grow([toPath(r.pts)], d)[0]); return r.grownBy.get(d); };
+    cache.raw.set(k, r);
+  }
+  return r;
+}
+
 const uidOf = (cache, part) => {
-  if (!cache.uids.has(part)) cache.uids.set(part, cache.uids.size + 1);
+  if (!cache.uids.has(part)) { cache.uids.set(part, cache.uids.size + 1); cache.partOf.set(cache.uids.get(part), part); }
   return cache.uids.get(part);
 };
 
@@ -117,7 +158,13 @@ function turnedCached(cache, part, deg, mirror = false) {
   if (!m) { m = new Map(); cache.set(part, m); }
   const k = `${deg}${mirror ? 'm' : ''}`;
   let t = m.get(k);
-  if (!t) { t = turned(part, deg, mirror); t.path = toPath(t.pts); t.key = `S${uidOf(cache, part)}@${k}`; m.set(k, t); }
+  if (!t) {
+    const raw = rawOf(cache, part, mirror);
+    t = turned(part, deg, mirror, raw.pts);
+    t.path = toPath(t.pts); t.key = `S${uidOf(cache, part)}@${k}`;
+    t.uid = uidOf(cache, part); t.deg = deg; t.mirror = !!mirror; t.raw = raw;
+    m.set(k, t);
+  }
   return t;
 }
 
@@ -165,24 +212,54 @@ function grow(paths, d) {
 }
 
 // Where the moving part's corner (0,0 of its turned box) can't go next to one
-// obstacle: the obstacle swept around the part. It doesn't depend on where the
-// obstacle is, so it's worked out once per pair of shapes (in the obstacle's own
-// coordinates) and moved into place. Obstacles are already grown by the spacing.
-//   obstacle: { local (path at its own origin), key, ox, oy (scaled offset) }
-function noFitOne(ob, moving, movingKey, nfpCache) {
+// obstacle: the obstacle swept around the part (Minkowski sum), worked out once
+// and moved into place. Obstacles are already grown by the spacing.
+//   box / screw obstacle: { local (path at its own origin), key, ox, oy }
+//     - one per moving pose, just moved
+//   shape obstacle: { shape: { uid, mirror, deg, raw }, ox, oy } (ox, oy: where
+//     its own origin sits) - it depends only on the two parts' angle to each
+//     other, so it's worked out per relative angle and turned into place
+function noFitOne(ob, t, cache, d) {
   const C = L();
-  const k = `${ob.key}|${movingKey}`;
-  let nf = nfpCache.get(k);
-  if (!nf) {
-    const neg = moving.map((q) => ({ X: -q.X, Y: -q.Y }));
-    // (Clipper adds the obstacle's inside to its sweep; the part at a corner of
-    // the obstacle goes in too, or a part bigger than it could swallow it)
-    const swept = C.Clipper.MinkowskiSum(neg, [ob.local], true);
-    const around = neg.map((q) => ({ X: q.X + ob.local[0].X, Y: q.Y + ob.local[0].Y }));
-    nf = clip(C.ClipType.ctUnion, [...swept, around], []);
-    nfpCache.set(k, nf);
+  if (!ob.shape) {
+    const k = `${ob.key}|${t.key}`;
+    let nf = cache.nfp.get(k);
+    if (!nf) { nf = sweep(ob.local, t.path); cache.nfp.set(k, nf); }
+    return nf.map((poly) => poly.map((q) => ({ X: q.X + ob.ox, Y: q.Y + ob.oy })));
   }
-  return nf.map((poly) => poly.map((q) => ({ X: q.X + ob.ox, Y: q.Y + ob.oy })));
+  const o = ob.shape;
+  const rel = (((t.deg - o.deg) % 360) + 360) % 360;
+  // A turned-over obstacle: NFP(A over, B, rel) = mirror of NFP(A, B turned the
+  // other way over, -rel), so only face-up obstacles are ever swept
+  const relKey = (r) => +((((r % 360) + 360) % 360).toFixed(6));
+  const bm = o.mirror ? !t.mirror : t.mirror, r0 = o.mirror ? relKey(-rel) : relKey(rel);
+  const k = `S${o.uid}|${t.uid}${bm ? 'm' : ''}@${r0}`;
+  let nf = cache.nfp.get(k);
+  if (!nf) {
+    // moving part (its own coordinates, origin = its part origin) at the relative angle
+    const a = (r0 * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
+    const Braw = rawOf(cache, cache.partOf.get(t.uid), bm).pts;
+    const B = toPath(Braw.map(([x, y]) => [c * x - s * y, s * x + c * y]));
+    nf = sweep(rawOf(cache, cache.partOf.get(o.uid), false).grown(d), B);
+    cache.nfp.set(k, nf);
+  }
+  if (o.mirror) nf = nf.map((poly) => poly.map((q) => ({ X: q.X, Y: -q.Y })).reverse());
+  // turn by the obstacle's angle; then from the moving part's origin to its box corner
+  const a = (o.deg * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
+  const dx = ob.ox + t.minx * SCALE, dy = ob.oy + t.miny * SCALE;
+  return nf.map((poly) => poly.map((q) => ({ X: Math.round(c * q.X - s * q.Y + dx), Y: Math.round(s * q.X + c * q.Y + dy) })));
+}
+
+// Obstacle (path) swept around a moving part (path, its reference at 0,0): the
+// reference positions where they'd overlap. (Clipper adds the obstacle's inside
+// to its sweep; the part at a corner of the obstacle goes in too, or a part
+// bigger than it could swallow it.)
+function sweep(obstaclePath, moving) {
+  const C = L();
+  const neg = moving.map((q) => ({ X: -q.X, Y: -q.Y }));
+  const swept = C.Clipper.MinkowskiSum(neg, [obstaclePath], true);
+  const around = neg.map((q) => ({ X: q.X + obstaclePath[0].X, Y: q.Y + obstaclePath[0].Y }));
+  return clip(C.ClipType.ctUnion, [...swept, around], []);
 }
 
 // Usable area for the corner of a w x h box: the stock's usable rectangles shrunk
@@ -207,8 +284,17 @@ function bestSpot(sh, part, poses, cache, opts) {
     const t = turnedCached(cache, part, deg, mirror);
     const area = fitArea(sh.stock, t.w, t.h);
     if (!area.length) continue;
-    const blocked = sh.obstacles.flatMap((ob) => noFitOne(ob, t.path, t.key, cache.nfp));
+    const blocked = sh.obstacles.flatMap((ob) => noFitOne(ob, t, cache, sh.grow));
     const free = blocked.length ? clip(C.ClipType.ctDifference, area, blocked) : area;
+    // Clipper's difference now and then leaves a stray corner inside a blocked
+    // area: every spot that's about to win is checked against them directly
+    // (inside = winding above zero; on an edge is fine, that's touching)
+    const signs = blocked.map((b) => (C.Clipper.Orientation(b) ? 1 : -1));
+    const isBlocked = (q) => {
+      let w = 0;
+      for (let i = 0; i < blocked.length; i++) if (C.Clipper.PointInPolygon(q, blocked[i]) === 1) w += signs[i];
+      return w > 0;
+    };
     for (const poly of free) {
       for (const q of poly) {
         const x = q.X / SCALE, y = q.Y / SCALE;
@@ -219,7 +305,7 @@ function bestSpot(sh, part, poses, cache, opts) {
         const side = sh.gy < 0 ? y : sh.sheet.h - (y + t.h);
         const toEnd = sh.gx > 0 ? sh.extEnd - (x + t.w) : x - sh.extEnd;
         const score = Math.round(ext * 100) * 1e6 + Math.round(side * 100) * 10 + toEnd * 1e-3 + (deg % 90 ? 1 : 0) + (mirror ? 0.5 : 0);
-        if (!best || score < best.score - 1e-9) best = { deg, mirror, x, y, t, score };
+        if ((!best || score < best.score - 1e-9) && !isBlocked(q)) best = { deg, mirror, x, y, t, score };
       }
     }
   }
@@ -273,8 +359,10 @@ export function placeShapes(nest, parts, opts, spots = null) {
   const min = opts.remnantMin || { side: 8, area: 288 };
   const cache = new Map();   // part -> angle -> turned outline
   cache.uids = new Map();    // part -> number (for keys)
+  cache.partOf = new Map();  // number -> part
   cache.grown = new Map();   // obstacle key -> grown outline at its origin
   cache.nfp = new Map();     // obstacle key | moving key -> no-fit area at the obstacle's origin
+  cache.raw = new Map();     // part (+ side) -> fitting outline in its own coordinates
 
   // items, biggest first (copies together)
   const items = [];
@@ -311,18 +399,21 @@ export function placeShapes(nest, parts, opts, spots = null) {
     const taken = sheet.placements.reduce((a, pl) => { const b = pl.box || boxOf(pl); return a + (b.x1 - b.x0 + sp) * (b.y1 - b.y0 + sp); }, 0);
     // the end the shapes pack from, and how far along they reach so far
     const extEnd = gx > 0 ? Math.max(...stock.map((r) => r.x1)) : Math.min(...stock.map((r) => r.x0));
-    return { sheet, stock, obstacles, gx, gy, added: [], freeArea: usable - taken, extEnd, ext: extEnd };
+    return { sheet, stock, obstacles, gx, gy, added: [], freeArea: usable - taken, extEnd, ext: extEnd, grow: d };
   };
 
   // One pass: the shapes in this order, each to the first sheet it fits on.
   // replay: [item index] -> [sheet, deg, x, y] from an earlier pass (no fitting)
+  let passNo = 0, passCount = 1;
   const pass = (order, replay = null) => {
+    passNo++;
     const sheets = nest.sheets.map((s) => ({ ...s, placements: s.placements.map((pl) => ({ ...pl, box: pl.box || boxOf(pl) })) }));
     const states = sheets.map(stateOf);
     const unplaced = [...(nest.unplaced || [])];
 
     const used = [];   // where each item (by index) went: [sheet index, deg, x, y] or null
-    for (const [n, it] of order.map((k) => [k, items[k]])) {
+    for (const [step, [n, it]] of order.map((k) => [k, items[k]]).entries()) {
+      if (opts.onProgress && !replay) opts.onProgress({ pass: passNo, passes: passCount, part: step + 1, parts: items.length });
       const angles = posesFor(it.part, opts);
       let spot = null, st = null;
       const again = replay?.[n];
@@ -368,7 +459,8 @@ export function placeShapes(nest, parts, opts, spots = null) {
       st.added.push(pl);
       st.freeArea -= it.area;
       st.ext = st.gx > 0 ? Math.min(st.ext, x) : Math.max(st.ext, x + t.w);
-      if (!replay) st.obstacles.push(obstacle(t.pts, x, y, t.key, sp + SLACK, cache));
+      // as an obstacle: its own origin sits at (x - minx, y - miny), turned deg
+      if (!replay) st.obstacles.push({ shape: { uid: t.uid, mirror: t.mirror, deg: t.deg, raw: t.raw }, ox: Math.round((x - t.minx) * SCALE), oy: Math.round((y - t.miny) * SCALE) });
     }
     // how good: fewest left over, fewest sheets, then the shortest runs of shapes
     const run = states.reduce((a, s2) => a + (s2.added.length ? Math.abs(s2.ext - s2.extEnd) : 0), 0);
@@ -393,6 +485,7 @@ export function placeShapes(nest, parts, opts, spots = null) {
       orders.push(o);
     }
     const better = (a, b) => { for (let i = 0; i < a.length; i++) { if (a[i] < b[i] - 1e-6) return true; if (a[i] > b[i] + 1e-6) return false; } return false; };
+    passCount = orders.length;
     for (const o of orders) { const r = pass(o); if (!best || better(r.cost, best.cost)) best = r; }
   }
   const { sheets, states, unplaced, used } = best;
