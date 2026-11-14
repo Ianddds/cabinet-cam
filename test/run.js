@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import './clipper-node.js';
-import { sampleKitchen, rawPart } from './synthetic.js';
+import { sampleKitchen, rawPart, sampleCabinetPlaces } from './synthetic.js';
+import { cabinetModel, drawerBoxes, constructionHTML } from '../public/lib/construction.js';
 import { inRegion, difference, offset, union, area, intersect } from '../public/lib/clip.js';
 import { placeShapes, isShapePart } from '../public/lib/shapes.js';
 import { normalizeAll } from '../lib/parts.js';
@@ -1291,6 +1292,28 @@ for (const g of groupParts(parts)) {
     console.log(`rapids (onion ${onion}): ${tot.toFixed(0)} in, baseline ${base}`);
     check(tot <= base * 1.02, `rapid travel went up: ${tot.toFixed(0)} in vs baseline ${base} (onion ${onion})`);
   }
+}
+
+// ---------- construction sheets ----------
+{
+  const kitchen = normalizeAll(sampleKitchen()).places;
+  check(kitchen.length === 15, `sample kitchen: placements for the 15 placed cabinet parts (got ${kitchen.length})`);
+  const b36 = cabinetModel(kitchen.filter((p) => p.cabinet === 'B36'));
+  check(Math.abs(b36.W - 36) < 1e-3 && Math.abs(b36.H - 34.5) < 1e-3 && Math.abs(b36.D - 23.25) < 1e-3, `B36 drawn 36 x 34.5 x 23.25 (got ${b36.W} x ${b36.H} x ${b36.D})`);
+  const ref = JSON.stringify(cabinetModel(sampleCabinetPlaces(0)).parts.map((p) => [p.name, p.b]));
+  for (const turn of [1, 2, 3]) {
+    const m = cabinetModel(sampleCabinetPlaces(turn));
+    check(JSON.stringify(m.parts.map((p) => [p.name, p.b])) === ref, `cabinet turned ${turn * 90}°: same front, same drawing`);
+  }
+  const m = cabinetModel(sampleCabinetPlaces(1));
+  const door = m.parts.find((p) => p.role === 'DOOR');
+  check(door.b[4] <= 0 + 1e-3 && door.b[1] < 0, 'door in front of the case');
+  const dr = drawerBoxes(m);
+  check(dr.length === 2 && Math.abs(dr[0].h - 10) < 1e-3 && Math.abs(dr[1].h - 6) < 1e-3 && Math.abs(dr[0].w - 12.625) < 1e-3,
+    `two drawer boxes, top first (got ${dr.map((d) => `${d.w}x${d.h}x${d.d}`).join(', ')})`);
+  const html = constructionHTML([...kitchen, ...sampleCabinetPlaces(3)], { job: 'T', cabinets: new Set(['B30D', 'B24']) });
+  check(html && (html.match(/class="page"/g) || []).length === 2, 'one page per chosen cabinet');
+  check(constructionHTML([], {}) === null, 'nothing to draw: null');
 }
 
 console.log(`\npocket lifts after first entry: ${liftTotal} across ${pocketTotal} pockets`);

@@ -140,7 +140,14 @@ function(context is Context, queries is map)
                     "box" : [bounds.minCorner[0] / meter, bounds.minCorner[1] / meter, bounds.minCorner[2] / meter,
                             bounds.maxCorner[0] / meter, bounds.maxCorner[1] / meter, bounds.maxCorner[2] / meter],
                     "faces" : faces,
-                    "cuts" : cuts
+                    "cuts" : cuts,
+                    // where the part sits in the model (for construction drawings):
+                    // the local frame's origin and axes in world coordinates
+                    "place" : {
+                        "o" : [cs.origin[0] / meter, cs.origin[1] / meter, cs.origin[2] / meter],
+                        "x" : [cs.xAxis[0], cs.xAxis[1], cs.xAxis[2]],
+                        "z" : [cs.zAxis[0], cs.zAxis[1], cs.zAxis[2]]
+                    }
                 });
     }
     return result;

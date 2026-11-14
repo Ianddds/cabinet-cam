@@ -55,8 +55,13 @@ export function rawPart(name, outline, t, pockets = [], opts = {}) {
     box: [Math.min(...xs) * M, Math.min(...ys) * M, -t * M, Math.max(...xs) * M, Math.max(...ys) * M, 0],
     faces,
     cuts,
+    ...(opts.place ? { place: { o: opts.place.o.map((n) => n * M), x: opts.place.x, z: opts.place.z } } : {}),
   };
 }
+
+// Model placement (inches): local frame origin o, local x axis, face normal z.
+// World: x = right, y = into the cabinets (front at y = 0), z = up.
+const at = (o, x, z) => ({ o, x, z });
 
 export function sampleKitchen() {
   const t = 0.75;
@@ -68,16 +73,19 @@ export function sampleKitchen() {
     { rect: [0, 0, 0.5, 34.5], depth: 0.375 },            // back rabbet along x=0 edge (through)
   ];
   const parts = [];
+  // cabinets side by side from x = 0; side local x runs from the back (y = 23.25) forward
+  const X0 = { B36: 0, B24: 36, B18: 60 }, WD = { B36: 36, B24: 24, B18: 18 };
   for (const cab of ['B36', 'B24', 'B18']) {
-    parts.push(rawPart(`${cab} Left Side`, side, t, sidePockets, { cabinet: cab }));
-    parts.push(rawPart(`${cab} Right Side`, side, t, sidePockets, { cabinet: cab, side: 'bottom' }));
+    const x0 = X0[cab], x1 = X0[cab] + WD[cab];
+    parts.push(rawPart(`${cab} Left Side`, side, t, sidePockets, { cabinet: cab, place: at([x0, 23.25, 0], [0, -1, 0], [-1, 0, 0]) }));
+    parts.push(rawPart(`${cab} Right Side`, side, t, sidePockets, { cabinet: cab, side: 'bottom', place: at([x1 - t, 23.25, 0], [0, -1, 0], [-1, 0, 0]) }));
   }
-  parts.push(rawPart('B36 Bottom', rectPoly(0, 0, 34.75, 22.75), t, [], { cabinet: 'B36' }));
-  parts.push(rawPart('B24 Bottom', rectPoly(0, 0, 22.75, 22.75), t, [], { cabinet: 'B24' }));
-  parts.push(rawPart('B18 Bottom', rectPoly(0, 0, 16.75, 22.75), t, [], { cabinet: 'B18' }));
   for (const [cab, w] of [['B36', 34.75], ['B24', 22.75], ['B18', 16.75]]) {
-    parts.push(rawPart(`${cab} Front Stretcher`, rectPoly(0, 0, w, 4), t, [], { cabinet: cab }));
-    parts.push(rawPart(`${cab} Rear Stretcher`, rectPoly(0, 0, w, 4), t, [], { cabinet: cab }));
+    parts.push(rawPart(`${cab} Bottom`, rectPoly(0, 0, w, 22.75), t, [], { cabinet: cab, place: at([X0[cab] + 0.625, 0, 4.75], [1, 0, 0], [0, 0, 1]) }));
+  }
+  for (const [cab, w] of [['B36', 34.75], ['B24', 22.75], ['B18', 16.75]]) {
+    parts.push(rawPart(`${cab} Front Stretcher`, rectPoly(0, 0, w, 4), t, [], { cabinet: cab, place: at([X0[cab] + 0.625, 0, 34.5], [1, 0, 0], [0, 0, 1]) }));
+    parts.push(rawPart(`${cab} Rear Stretcher`, rectPoly(0, 0, w, 4), t, [], { cabinet: cab, place: at([X0[cab] + 0.625, 18.75, 34.5], [1, 0, 0], [0, 0, 1]) }));
   }
   // Frameless base side as Cabinet build makes it (no toe notch, separate base):
   // bottom rabbet, back groove and back stretcher rabbet are all 1/4 deep and
@@ -152,4 +160,45 @@ export function sampleKitchen() {
   parts.push(rawPart('B36 envelope', rectPoly(0, 0, 36, 34.5), 24, [], { attributes: [{ cabinetLayout: 'envelope' }] }));
   parts.push(rawPart('Part 7', rectPoly(0, 0, 10, 3), 0.75, [], { attributes: [] }));
   return parts;
+}
+
+// A base cabinet with a partition, doors, drawers, shelves, back and toe kick,
+// as construction-drawing records (what lib/parts.js placeOf returns), built
+// from world boxes. turn: quarter turns about the vertical, to check the
+// cabinet's front is found wherever it stands.
+export function sampleCabinetPlaces(turn = 0, code = 'B30D') {
+  const list = [];
+  const add = (name, role, bx, material = '3/4 Baltic Birch', cnc = true) => list.push({ name: `${code}-${name}`, role, bx, material, cnc });
+  add('SIDE-L', 'SIDE', [0, 0, 4, 0.75, 24, 34.5]);
+  add('SIDE-R', 'SIDE', [29.25, 0, 4, 30, 24, 34.5]);
+  add('BOTTOM', 'BOTTOM', [0.75, 0, 4, 29.25, 23.25, 4.75]);
+  add('BACK', 'BACK', [0.75, 23.25, 4, 29.25, 23.5, 34.5], '1/4 Ply');
+  add('STRETCHER-F', 'STRETCHER', [0.75, 0, 33.75, 29.25, 4, 34.5]);
+  add('STRETCHER-B', 'STRETCHER', [0.75, 19.25, 33.75, 29.25, 23.25, 34.5]);
+  add('TOE_KICK', 'TOE_KICK', [0.75, 3, 0, 29.25, 3.75, 4]);
+  add('PARTITION', 'PARTITION', [14.625, 0, 4.75, 15.375, 23.25, 33.75]);
+  add('FIXED_SHELF', 'FIXED_SHELF', [0.75, 0, 18, 14.625, 23.25, 18.75]);
+  add('ADJ_SHELF', 'ADJ_SHELF', [0.75, 0.25, 25, 14.625, 22.5, 25.75]);
+  for (const [k, z0, h] of [[1, 6, 6], [2, 20, 10]]) {
+    add(`DRAWER_SIDE-${k}-L`, 'DRAWER_SIDE', [16, 1, z0, 16.5, 22, z0 + h], 'BB 1/2');
+    add(`DRAWER_SIDE-${k}-R`, 'DRAWER_SIDE', [28.125, 1, z0, 28.625, 22, z0 + h], 'BB 1/2');
+    add(`DRAWER_FRONT-${k}`, 'DRAWER_FRONT', [16.5, 1, z0, 28.125, 1.5, z0 + h], 'BB 1/2');
+    add(`DRAWER_BACK-${k}`, 'DRAWER_BACK', [16.5, 21.5, z0 + 0.5, 28.125, 22, z0 + h], 'BB 1/2');
+    add(`DRAWER_BOTTOM-${k}`, 'DRAWER_BOTTOM', [16.25, 1.25, z0 + 0.5, 28.375, 21.75, z0 + 0.75], '1/4 Ply');
+  }
+  add('DOOR', 'DOOR', [0.0625, -0.75, 4.0625, 14.9375, 0, 34.4375], 'Maple 3/4');
+  add('DRAWER_FACE-1', 'DRAWER_FACE', [15.0625, -0.75, 4.0625, 29.9375, 0, 16.9375], 'Maple 3/4');
+  add('DRAWER_FACE-2', 'DRAWER_FACE', [15.0625, -0.75, 17.0625, 29.9375, 0, 34.4375], 'Maple 3/4');
+  const c = [1, 0, -1, 0][turn & 3], s = [0, 1, 0, -1][turn & 3];
+  const rot = ([x, y, z]) => [+(c * x - s * y + 100).toFixed(4), +(s * x + c * y + 50).toFixed(4), z];
+  return list.map(({ name, role, bx, material, cnc }) => {
+    const e = [bx[3] - bx[0], bx[4] - bx[1], bx[5] - bx[2]];
+    const thin = e.indexOf(Math.min(...e));
+    const n = [0, 0, 0]; n[thin] = 1;
+    const corners = [];
+    for (const x of [bx[0], bx[3]]) for (const y of [bx[1], bx[4]]) for (const z of [bx[2], bx[5]]) corners.push(rot([x, y, z]));
+    const r = rot(n), r0 = rot([0, 0, 0]);
+    const others = e.filter((_, i) => i !== thin).sort((a, b) => b - a);
+    return { name, cabinet: code, role, material, cnc, size: [...others, e[thin]], n: [r[0] - r0[0], r[1] - r0[1], r[2] - r0[2]], corners };
+  });
 }

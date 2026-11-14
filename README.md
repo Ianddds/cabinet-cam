@@ -164,6 +164,18 @@ Settings: label width × height (default 2 × 1 in; other sizes scale), printer 
 
 **Print layouts** (Sheets card) prints every sheet on an ordinary printer, one landscape page per sheet; **Print layout** next to a sheet's download prints just that one. Each page has the sheet drawn in black and white with each part's **#number** (matching the labels), name and size, dados shaded, offcuts to keep dashed (with their R number once the job is marked cut), the zero corner and grain direction, then a parts list (#, part, cabinet, size, grain, dados/cutouts). Paper size comes from the print dialog (Letter, Legal, A4…).
 
+## Construction sheets
+
+**Construction sheets** (Parts card) prints one landscape page per cabinet for the shop assembling it:
+
+- **Front** with the fronts off: every case part drawn where it sits, numbered; overall width and height; the height from the floor to the top of each fixed part (bottom, stretchers, fixed shelves, top); partitions from the left side.
+- **Section** through the middle of a bay, seen from the right with the front at the left: what the cut passes through shaded, what's behind it in grey; overall depth and how far the back is set in.
+- **Fronts**: doors and drawer faces with their sizes, and their height off the floor.
+- **Parts list** numbered to match the drawings: part, qty, L × W × T, material, the Onshape labels, and, once nested, the sheet and # each part is on (matching the printed layouts and labels). Face frame parts say "cut list".
+- **Drawer boxes**: outside width × height × depth and the height of each box's bottom, top drawer first.
+
+The drawings come from where each part sits in the Onshape model, so the parts must be read with this version (click **Get parts** again for a job read before). Only parts tagged with a cabinet are drawn; the cabinet filter chips also choose which cabinets print. The cabinet's front is found from its back panel (else its doors / face frame, else the model's front), so cabinets turned in the layout print the right way round. Hardware isn't drawn.
+
 ## Grain
 
 Each part's grain is decided in this order:

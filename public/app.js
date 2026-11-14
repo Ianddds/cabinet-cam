@@ -8,6 +8,7 @@ import { parsePP } from './lib/vpp.js';
 import { DEFAULT_LIBRARY, TOOL_FIELDS, newTool, resolveTools } from './lib/tools.js';
 import { cutListRows, cutListCSV, fraction, roleName } from './lib/cutlist.js';
 import { layoutsHTML } from './lib/printsheets.js';
+import { constructionHTML } from './lib/construction.js';
 import { sheetLabels, remnantLabel, toZPL, labelSVG, numberPlacements } from './lib/labels.js';
 import { GRAIN_CHOICES, grainLabel, effectiveGrain, applyGrain, splitPart, carryOverrides, roleKey } from './lib/grain.js';
 
@@ -97,6 +98,7 @@ function setParts(data) {
   delete data.raw;
   const sameSource = job.source?.url && data.source?.url === job.source.url;
   job.parts = sameSource ? carryOverrides(job.parts, data.parts) : data.parts;
+  job.places = data.places || [];
   if (!sameSource) { job.nests = {}; job.manualScrews = {}; job.offCabinets = []; }
   if (job.cut) {
     // a cut job is a record of what was cut: new parts start a new job
@@ -971,6 +973,44 @@ function printLayouts(items) {
   };
 }
 $('#printLayouts').onclick = () => printLayouts(results.flatMap((r) => r.sheets));
+
+// ---------- construction sheets (one page per cabinet, for assembly) ----------
+function printHTML(html) {
+  const frame = document.createElement('iframe');
+  frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+  document.body.appendChild(frame);
+  frame.srcdoc = html;
+  frame.onload = () => {
+    frame.contentWindow.focus();
+    frame.contentWindow.print();
+    setTimeout(() => frame.remove(), 60000);
+  };
+}
+$('#constructionBtn').onclick = () => {
+  if (!job.places?.length) {
+    showMessages([{ error: true, text: job.parts?.length
+      ? 'Construction sheets need where each part sits in the model. Click Get parts again to read the Part Studio with this version.'
+      : 'Get parts first.' }]);
+    return;
+  }
+  // which sheet and number each nested part is on, as on the printed layouts
+  const where = new Map();
+  for (const r of results) {
+    const fulls = r.sheets.filter((y) => !y.sheet.remnant);
+    for (const item of r.sheets) {
+      const name = item.sheet.remnant ? `R${item.sheet.remnant.no ?? '?'}` : `Sheet ${fulls.indexOf(item) + 1}`;
+      for (const pl of item.sheet.placements) {
+        const key = pl.label || pl.part.name;
+        if (!where.has(key)) where.set(key, name);
+      }
+    }
+  }
+  const off = new Set(job.offCabinets || []);
+  const cabinets = new Set(job.places.map((p) => p.cabinet).filter((c) => c && !off.has(c)));
+  const html = constructionHTML(job.places, { job: job.name || 'Job', where, cabinets });
+  if (!html) { showMessages([{ error: true, text: 'No cabinet parts to draw (only parts tagged with a cabinet are drawn).' }]); return; }
+  printHTML(html);
+};
 
 $('#labelsBtn').onclick = () => { $('#labelsPanel').hidden = !$('#labelsPanel').hidden; renderLabels(); };
 $('#lblSheet').onclick = (e) => busy(e.target, async () => {

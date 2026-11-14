@@ -76,15 +76,15 @@ app.post('/api/extract', wrap(async (req, res) => {
   }
   const { parts: raw, notices, console: fsConsole } = extraction;
   const info = {};
-  const { parts, errors, untagged } = normalizeAll(raw);
-  res.json({ source: { url: req.body.url, ...ref, ...info }, parts, errors, untagged, notices, console: fsConsole, rawCount: raw.length, ms: Date.now() - t0, raw, callsThisYear: onshape.callsThisYear() });
+  const { parts, errors, untagged, places } = normalizeAll(raw);
+  res.json({ source: { url: req.body.url, ...ref, ...info }, parts, places, errors, untagged, notices, console: fsConsole, rawCount: raw.length, ms: Date.now() - t0, raw, callsThisYear: onshape.callsThisYear() });
 }));
 
 // Offline sample so the app can be tried without Onshape.
 app.get('/api/sample', wrap(async (req, res) => {
   const { sampleKitchen } = await import('./test/synthetic.js');
-  const { parts, errors } = normalizeAll(sampleKitchen());
-  res.json({ source: { documentName: 'Sample kitchen (offline)', elementName: 'Synthetic parts' }, parts, errors, notices: [] });
+  const { parts, errors, places } = normalizeAll(sampleKitchen());
+  res.json({ source: { documentName: 'Sample kitchen (offline)', elementName: 'Synthetic parts' }, parts, places, errors, notices: [] });
 }));
 
 // ---------- post-processors (.pp files) ----------
