@@ -177,7 +177,6 @@
           <h2>Parts</h2>
           <span id="partsSummary" class="muted small"></span>
           <span class="spacer"></span>
-          <button id="constructionBtn" title="Print one page per cabinet for the shop assembling it: front view, a section, the fronts, sizes, heights of the fixed parts, drawer boxes and a parts list (with sheet numbers once nested)">Construction sheets</button>
           <button id="nestBtn" class="primary" disabled>Nest &amp; toolpath</button>
         </div>
         <div id="messages"></div>
@@ -215,6 +214,7 @@
           <span id="resultsSummary" class="muted small"></span>
           <span class="spacer"></span>
           <button id="labelsBtn" title="Zebra labels: one strip per sheet">Labels…</button>
+          <button id="constructionBtn" title="Print one page per cabinet for the shop assembling it: front view, a section, the fronts, sizes, heights of the fixed parts, drawer boxes and a parts list (with sheet numbers once nested)">Construction sheets</button>
           <button id="printLayouts" title="Print every sheet's layout and parts list on an ordinary printer, one page per sheet">Print layouts</button>
           <button id="markCut" title="Uses up the remnants this job was nested on and keeps its offcuts as new remnants">Mark job as cut</button>
           <button id="searchAgain" title="Search again from a different starting point; the layout only changes if the new one is better">Search again</button>
@@ -256,6 +256,17 @@
 
   <script src="lib/vendor/clipper.js"></script>
   <script type="module" src="app.js"></script>
+  <div id="printPreview" class="print-preview" hidden>
+    <div class="pp-bar">
+      <strong id="ppTitle">Print preview</strong>
+      <span id="ppPages" class="muted small"></span>
+      <span class="spacer"></span>
+      <label class="small">Zoom <select id="ppZoom"><option value="fit">Fit width</option><option value="page">Whole page</option><option value="0.5">50%</option><option value="0.75">75%</option><option value="1">100%</option></select></label>
+      <button id="ppPrint" class="primary">Print…</button>
+      <button id="ppClose">Close</button>
+    </div>
+    <iframe id="ppFrame" title="Print preview"></iframe>
+  </div>
   <dialog id="keysDlg">
     <form method="dialog" class="keys-form">
       <h3>Onshape API keys</h3>

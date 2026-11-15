@@ -960,32 +960,64 @@ function layoutPage(item) {
   return { item, heading, sub, note, remnantNos };
 }
 
+// ---------- print preview ----------
+// Every printout (sheet layouts, construction sheets, cut list) opens here first:
+// the pages as they'll come out of the printer, then Print… for the printer
+// dialog. The document's own pages are <section class="page">; the preview only
+// adds screen styles, so what prints is unchanged.
+const PAPER = { landscape: [11, 8.5], portrait: [8.5, 11] };
+let ppOrient = 'landscape';
+function previewStyle(orient, margin) {
+  const [w, h] = PAPER[orient];
+  return `@media screen {
+    html { background: #5f6368; }
+    body { margin: 0 !important; padding: 20px 0 !important; }
+    .page { width: ${w}in; min-height: ${h}in; margin: 0 auto 20px !important; padding: ${margin}in; background: #fff;
+      box-shadow: 0 2px 12px rgba(0,0,0,.45); box-sizing: border-box; }
+  }`;
+}
+function fitPreview() {
+  const frame = $('#ppFrame');
+  const doc = frame.contentDocument;
+  if (!doc?.body) return;
+  const [w, h] = PAPER[ppOrient];
+  const v = $('#ppZoom').value;
+  const z = v === 'fit' ? (frame.clientWidth - 40) / (w * 96)
+    : v === 'page' ? Math.min((frame.clientWidth - 40) / (w * 96), (frame.clientHeight - 40) / (h * 96))
+    : +v;
+  doc.body.style.zoom = String(Math.max(0.2, Math.min(z, 2)));
+}
+function printPreview(html, { title = 'Print preview', orient = 'landscape', margin = 0.4 } = {}) {
+  ppOrient = orient;
+  const frame = $('#ppFrame');
+  $('#ppTitle').textContent = title;
+  $('#ppPages').textContent = '';
+  $('#printPreview').hidden = false;
+  frame.onload = () => {
+    const doc = frame.contentDocument;
+    const st = doc.createElement('style');
+    st.textContent = previewStyle(orient, margin);
+    doc.head.appendChild(st);
+    const n = doc.querySelectorAll('.page').length;
+    $('#ppPages').textContent = n ? `${n} page${n === 1 ? '' : 's'} · ${orient}` : '';
+    fitPreview();
+  };
+  frame.srcdoc = html;
+}
+const closePreview = () => { $('#printPreview').hidden = true; $('#ppFrame').srcdoc = ''; };
+$('#ppClose').onclick = closePreview;
+$('#ppPrint').onclick = () => { const w = $('#ppFrame').contentWindow; w.focus(); w.print(); };
+$('#ppZoom').onchange = fitPreview;
+window.addEventListener('resize', () => { if (!$('#printPreview').hidden) fitPreview(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#printPreview').hidden) closePreview(); });
+
 function printLayouts(items) {
   const html = layoutsHTML(items.map(layoutPage), job.name || 'Job');
-  const frame = document.createElement('iframe');
-  frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
-  document.body.appendChild(frame);
-  frame.srcdoc = html;
-  frame.onload = () => {
-    frame.contentWindow.focus();
-    frame.contentWindow.print();
-    setTimeout(() => frame.remove(), 60000);
-  };
+  printPreview(html, { title: items.length === 1 ? 'Sheet layout' : `Sheet layouts (${job.name || 'Job'})` });
 }
 $('#printLayouts').onclick = () => printLayouts(results.flatMap((r) => r.sheets));
 
 // ---------- construction sheets (one page per cabinet, for assembly) ----------
-function printHTML(html) {
-  const frame = document.createElement('iframe');
-  frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
-  document.body.appendChild(frame);
-  frame.srcdoc = html;
-  frame.onload = () => {
-    frame.contentWindow.focus();
-    frame.contentWindow.print();
-    setTimeout(() => frame.remove(), 60000);
-  };
-}
 $('#constructionBtn').onclick = () => {
   if (!job.places?.length) {
     showMessages([{ error: true, text: job.parts?.length
@@ -1009,7 +1041,7 @@ $('#constructionBtn').onclick = () => {
   const cabinets = new Set(job.places.map((p) => p.cabinet).filter((c) => c && !off.has(c)));
   const html = constructionHTML(job.places, { job: job.name || 'Job', where, cabinets });
   if (!html) { showMessages([{ error: true, text: 'No cabinet parts to draw (only parts tagged with a cabinet are drawn).' }]); return; }
-  printHTML(html);
+  printPreview(html, { title: `Construction sheets (${job.name || 'Job'})` });
 };
 
 $('#labelsBtn').onclick = () => { $('#labelsPanel').hidden = !$('#labelsPanel').hidden; renderLabels(); };
@@ -1133,18 +1165,14 @@ $('#fetchParts').onclick = (e) => busy(e.target, async () => {
 const jobStamp = () => (job.name || 'job').replace(/[^\w-]+/g, '_').slice(0, 40);
 $('#cutListCsv').onclick = () => download(`${jobStamp()}_cutlist.csv`, cutListCSV(cutListRows(runParts().filter((p) => p.qty > 0))));
 $('#cutListPrint').onclick = () => {
-  const w = window.open('', '_blank');
-  if (!w) { showMessages([{ error: true, text: 'Allow pop-ups for this page to print the cut list.' }]); return; }
-  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(job.name || 'Cut list')}</title><style>
-    body{font:13px system-ui,sans-serif;margin:24px;color:#111}h1{font-size:18px;margin:0 0 4px}p{margin:0 0 14px;color:#555}
+  printPreview(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(job.name || 'Cut list')}</title><style>
+    @page{size:portrait;margin:0.5in}
+    body{font:13px system-ui,sans-serif;margin:0;color:#111}h1{font-size:18px;margin:0 0 4px}p{margin:0 0 14px;color:#555}
     table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #ccc;padding:5px 8px;text-align:left}
     th{font-size:11px;text-transform:uppercase;color:#555}td.num{text-align:right;font-variant-numeric:tabular-nums}
     tr.group td{background:#eee;font-weight:600}.muted{color:#777}.small{font-size:11px}</style></head><body>
-    <h1>Cut list — ${esc(job.name || '')}</h1><p>${new Date().toLocaleDateString()} · parts not cut on the CNC</p>
-    ${cutListHtml(cutListRows(runParts().filter((p) => p.qty > 0)))}</body></html>`);
-  w.document.close();
-  w.focus();
-  w.print();
+    <section class="page"><h1>Cut list — ${esc(job.name || '')}</h1><p>${new Date().toLocaleDateString()} · parts not cut on the CNC</p>
+    ${cutListHtml(cutListRows(runParts().filter((p) => p.qty > 0)))}</section></body></html>`, { title: 'Cut list', orient: 'portrait', margin: 0.5 });
 };
 $('#saveRaw').onclick = () => {
   const name = (job.name || 'onshape').replace(/[^\w-]+/g, '_').slice(0, 40);
