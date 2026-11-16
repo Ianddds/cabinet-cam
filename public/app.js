@@ -9,7 +9,7 @@ import { DEFAULT_LIBRARY, TOOL_FIELDS, newTool, resolveTools } from './lib/tools
 import { cutListRows, cutListCSV, fraction, roleName } from './lib/cutlist.js';
 import { layoutsHTML } from './lib/printsheets.js';
 import { constructionHTML } from './lib/construction.js';
-import { moveRoom, applyMoves, moveKey } from './lib/moveparts.js';
+import { moveRoom, applyMoves, moveKey, copyAt, partKey } from './lib/moveparts.js';
 import { sheetLabels, remnantLabel, toZPL, labelSVG, numberPlacements } from './lib/labels.js';
 import { GRAIN_CHOICES, grainLabel, effectiveGrain, applyGrain, splitPart, carryOverrides, roleKey } from './lib/grain.js';
 
@@ -211,7 +211,7 @@ function renderParts() {
   const groups = groupParts(job.parts);
   let rows = '';
   for (const g of groups) {
-    const count = g.parts.filter((p) => p.include).reduce((a, p) => a + (forRun(p).qty || 0), 0);
+    const count = g.parts.filter((p) => p.include).reduce((a, p) => a + (forRun(p).qty || 0) + pendingOf(p), 0);
     const open = groupOpen(g);
     rows += `<tr class="group${open ? '' : ' shut'}" data-g="${esc(g.key)}" title="Click to ${open ? 'collapse' : 'expand'}"><td colspan="10"><span class="caret">${open ? '▾' : '▸'}</span> ${esc(g.key)} — ${count} pcs${open ? '' : ` <span class="muted small">(${g.parts.length} line${g.parts.length === 1 ? '' : 's'} hidden)</span>`}</td></tr>`;
     if (!open) continue;
@@ -227,7 +227,7 @@ function renderParts() {
         <td class="name-cell" title="${esc(names)}">${esc(p.name)}${p.sourceNames?.length > 1 ? ` <span class="muted">+${p.sourceNames.length - 1}</span>` : ''}${
           p.cnc !== false && p.qty > 1 && (p.sourceNames || []).length === p.qty ? ' <button class="link mini" data-split title="Split into one row per part, to change one of them">split</button>' : ''}</td>
         <td>${esc(p.cabinet)}</td>
-        <td><input class="qty" type="number" min="0" step="1" data-k="qty" value="${p.qty}">${runQty !== p.qty ? ` <span class="muted small" title="Copies in the cabinets ticked above">→ ${runQty}</span>` : ''}</td>
+        <td><input class="qty" type="number" min="0" step="1" data-k="qty" value="${effQty(p)}">${pendingOf(p) ? ` <span class="badge pend" title="Copied or deleted on the sheets: Nest &amp; toolpath nests the new count">${pendingOf(p) > 0 ? '+' : ''}${pendingOf(p)} on sheet</span>` : ''}${runQty !== p.qty ? ` <span class="muted small" title="Copies in the cabinets ticked above">→ ${runQty}</span>` : ''}</td>
         <td class="num">${f3(p.width)}</td><td class="num">${f3(p.height)}</td><td class="num">${f3(p.thickness)}</td>
         <td>${grainCell(p)}</td>
         <td class="num">${p.pockets.length || ''}${p.holes.length ? ` / ${p.holes.length} cut` : ''}</td>
@@ -236,7 +236,7 @@ function renderParts() {
     }
   }
   wrap.innerHTML = `<table><thead><tr><th></th><th>Part</th><th>Cab</th><th>Qty</th><th>Length</th><th>Width</th><th>Thk</th><th>Grain</th><th>Dados</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
-  const total = runParts().filter((p) => p.include).reduce((a, p) => a + (p.qty || 0), 0);
+  const total = runParts().filter((p) => p.include).reduce((a, p) => a + (p.qty || 0) + pendingOf(p), 0);
   $('#partsSummary').textContent = `${job.parts.length} unique · ${total} pcs · ${groups.length} material group${groups.length === 1 ? '' : 's'}`;
   $('#nestBtn').disabled = total === 0;
   $('#groupsToggle').hidden = groups.length < 2;
@@ -287,6 +287,8 @@ $('#partsTable').addEventListener('change', (e) => {
   const p = job.parts[+tr.dataset.i];
   const k = e.target.dataset.k;
   if (k === 'include') p.include = e.target.checked;
+  // copies / deletes from the sheets become the counts first (the layout changes anyway)
+  commitPending();
   if (k === 'qty') p.qty = Math.max(0, parseInt(e.target.value, 10) || 0);
   if (k === 'grain') p.grainOverride = e.target.value;
   renderParts();
@@ -581,6 +583,8 @@ const nestBetter = (a, b) => a.fullSheets !== b.fullSheets ? a.fullSheets < b.fu
 
 async function searchNests(force = false) {
   if (searching) return;
+  // parts copied or deleted on the sheets: their new counts are nested now
+  if (!job.cut && commitPending()) { moveMsg = ''; renderParts(); }
   const groups = nestGroups();
   job.nests = job.nests || {};
   if (job.cut) { showMessages([{ text: 'This job is marked as cut, so its layout is fixed. Undo "cut" to nest it again.' }]); runNest(); return; }
@@ -653,7 +657,7 @@ function runNest() {
     const mat = g.material.replace(/[^\w-]+/g, '_');
     const mkey = manualKey(key, kept);
     const sheets = nest.sheets.map((sheet, i) => {
-      applyMoves(sheet, job.manualMoves?.[mkey]?.[i], { gap: cfg.commonLine ? cfg.tool.dia : cfg.sheet.spacing, remnantMin: nestOpts.remnantMin });
+      applyMoves(sheet, job.manualMoves?.[mkey]?.[i], { gap: cfg.commonLine ? cfg.tool.dia : cfg.sheet.spacing, remnantMin: nestOpts.remnantMin, edits: job.layoutEdits?.[mkey]?.[i], partOf: (k) => g.parts.find((p) => partKey(p) === k) });
       applyManualScrews(sheet, job.manualScrews?.[mkey]?.[i]);
       const tp = sheetToolpaths(sheet, cfg);
       const rno = sheet.remnant && (remnants.find((r) => r.id === sheet.remnant.id)?.no ?? nestOpts.remnants.find((r) => r.id === sheet.remnant.id)?.no ?? kept?.stock?.find((r) => r.id === sheet.remnant.id)?.no);
@@ -953,7 +957,7 @@ function renderSheet(item) {
       <button id="dlSheet" class="${desk ? '' : 'primary'}" ${results.pendingShapes ? 'disabled title="Custom shapes are still being fitted"' : ''}>Download ${esc(item.file)}</button>
     </div>${svg}
     ${simNote}
-    ${moveEdit ? `<p class="small screw-help">Moving parts: drag a part where you want it. If it would come too close to another part's cut, a hold-down screw or the edge of the stock, it goes to the nearest spot where it fits (dashed outline while dragging). Right-click a moved part to put it back. ${sh.partsMoved || 0} moved on this sheet. <button id="moveReset" ${sh.partsMoved ? '' : 'disabled'}>Put all back</button></p>` : ''}
+    ${moveEdit ? `<p class="small screw-help">Moving parts: drag a part where you want it. If it would come too close to another part's cut, a hold-down screw or the edge of the stock, it goes to the nearest spot where it fits (dashed outline while dragging). Right-click a part to copy, delete or put it back; right-click a spot to paste. ${sh.partsMoved || 0} moved${sh.partsAdded ? `, ${sh.partsAdded} pasted` : ''}${sh.partsRemoved ? `, ${sh.partsRemoved} deleted` : ''} on this sheet. <button id="moveReset" ${sh.partsMoved ? '' : 'disabled'}>Put all back</button>${moveMsg ? `<br><span class="${moveMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(moveMsg.replace(/^!/, ''))}</span>` : ''}${job.pendingQty && Object.keys(job.pendingQty).length ? '<br><strong>Parts added or deleted: Nest &amp; toolpath nests again with the new counts.</strong> Until then deleted parts leave their spot empty and pasted ones stay where you put them.' : ''}</p>` : ''}
     ${screwEdit ? `<p class="small screw-help">Placing screws: click an empty spot to add one, drag to move, right-click to remove. Red = a cut or part is too close. ${sh.screws?.length || 0} on this sheet${sh.screwsManual ? ' (placed by hand)' : ''}. <button id="screwAuto" ${sh.screwsManual ? '' : 'disabled'}>Back to automatic</button> <button id="screwClear" ${sh.screws?.length ? '' : 'disabled'}>Remove all</button></p>` : ''}
     ${sh.remnant ? `<p class="small"><strong>Remnant R${sh.remnant.no ?? '?'}</strong> (${fraction(sh.w)} × ${fraction(sh.h)}): put its zero corner (the one that was the sheet's zero corner) at the origin, grain along X.</p>` : ''}
     <p class="muted small">Origin (red dot) is front-left of the ${sh.remnant ? 'remnant' : 'sheet'}, X along the ${s.sheetW}" side. Z0 = ${item.cfg.zZero === 'table' ? 'spoilboard' : 'material top'}. Air-cut new posts before running material.</p>`;
@@ -984,13 +988,128 @@ function setSheetMoves(item, moves) {
   if (moves && Object.keys(moves).length) m[item.idx] = moves;
   else delete m[item.idx];
   if (!Object.keys(m).length) delete job.manualMoves[item.mkey];
+  refreshSheet(item);
+}
+
+// the sheet again from its nest layout, hand moves and added / removed parts
+function refreshSheet(item) {
   const rmin = { side: job.settings.remnants?.minSide ?? 8, area: job.settings.remnants?.minArea ?? 288 };
-  applyMoves(item.sheet, moves, { gap: item.cfg.commonLine ? item.cfg.tool.dia : item.cfg.sheet.spacing, remnantMin: rmin });
+  applyMoves(item.sheet, job.manualMoves?.[item.mkey]?.[item.idx], { gap: item.cfg.commonLine ? item.cfg.tool.dia : item.cfg.sheet.spacing, remnantMin: rmin,
+    edits: job.layoutEdits?.[item.mkey]?.[item.idx], partOf: (k) => item.group.parts.find((p) => partKey(p) === k) });
   item.tp = sheetToolpaths(item.sheet, item.cfg);
   item.screwChk = screwsShown(item.cfg, item.sheet) ? screwCheck(item.sheet, item.tp.moves, item.cfg) : [];
   item.text = null;
   item.sim = null;
   renderResults();
+}
+
+// ---------- copy, paste and delete parts on a sheet ----------
+// A part deleted from a sheet leaves its spot empty, and a pasted one sits where
+// it was put, until Nest & toolpath nests again with the new counts. Until then
+// the change is kept per sheet (job.layoutEdits, like hand moves) and the parts
+// list shows the new count (job.pendingQty: per part id { delta, add, remove }).
+let partClip = null;   // { pl, group } copied in Move parts
+let moveMsg = '';      // the last copy / paste / delete note, shown under the sheet
+const pendingOf = (p) => job.pendingQty?.[partKey(p)]?.delta || 0;
+const effQty = (p) => Math.max(0, (p.qty || 0) + pendingOf(p));
+function sheetEdits(item) {
+  job.layoutEdits = job.layoutEdits || {};
+  const m = (job.layoutEdits[item.mkey] = job.layoutEdits[item.mkey] || {});
+  return (m[item.idx] = m[item.idx] || { removed: [], added: [] });
+}
+function pend(partId, delta, add, remove) {
+  job.pendingQty = job.pendingQty || {};
+  const q = (job.pendingQty[partId] = job.pendingQty[partId] || { delta: 0, add: [], remove: [] });
+  q.delta += delta;
+  if (add) q.add.push(add);
+  if (remove) {
+    const k = q.add.findIndex((a) => a.label === remove.label);
+    if (k >= 0) q.add.splice(k, 1); else q.remove.push(remove);
+  }
+  if (!q.delta && !q.add.length && !q.remove.length) delete job.pendingQty[partId];
+}
+function deletePlaced(item, pl) {
+  const ed = sheetEdits(item);
+  if (pl.added) ed.added = ed.added.filter((a) => !(a.partId === partKey(pl.part) && a.copy === pl.copy));
+  else ed.removed.push(moveKey(pl));
+  pend(partKey(pl.part), -1, null, { label: pl.label || pl.part.name, cabinet: pl.cabinet ?? pl.part.cabinet });
+  moveMsg = `Deleted ${pl.label || pl.part.name} (its spot stays empty until Nest & toolpath nests again).`;
+  renderParts();
+  refreshSheet(item);
+}
+function pastePlaced(item, spot) {
+  const src = partClip.pl;
+  const name = src.label || src.part.name;
+  if (partClip.group !== item.group.key) {
+    moveMsg = `!${name} is ${partClip.group}: paste it on a sheet of that material.`;
+    renderResults();
+    return;
+  }
+  const ed = sheetEdits(item);
+  const taken = new Set(item.sheet.placements.filter((q) => partKey(q.part) === partKey(src.part)).map((q) => q.copy).concat(ed.added.filter((a) => a.partId === partKey(src.part)).map((a) => a.copy)));
+  let copy = 1001;
+  while (taken.has(copy)) copy++;
+  const base = name.replace(/ copy( \d+)?$/, '');
+  const all = new Set(job.parts.flatMap((p) => p.sourceNames || [p.name]).concat(Object.values(job.pendingQty || {}).flatMap((q) => q.add.map((a) => a.label))));
+  let label = `${base} copy`;
+  for (let n = 2; all.has(label); n++) label = `${base} copy ${n}`;
+  const cand = copyAt(src, spot.x, spot.y, { copy, label });
+  const sh = item.sheet;
+  const tmp = { ...sh, placements: [...sh.placements, cand] };
+  const screws = screwsShown(item.cfg, sh) ? sh.screws || [] : [];
+  const f = moveRoom(tmp, tmp.placements.length - 1, { gap: (q) => partGap(item.cfg, cand, q), screws, screwClear: screwR(item.cfg.screws || {}) + item.cfg.tool.dia / 2 }).fit(0, 0);
+  if (!f.ok) {
+    moveMsg = `!No room for another ${base} on this sheet. Delete or move parts to make room, or add it in the parts list and nest again.`;
+    renderResults();
+    return;
+  }
+  const at2 = { ...cand, x: cand.x + f.dx, y: cand.y + f.dy, ...(cand.xf ? { xf: { ...cand.xf, tx: cand.xf.tx + f.dx, ty: cand.xf.ty + f.dy }, box: { x0: cand.box.x0 + f.dx, y0: cand.box.y0 + f.dy, x1: cand.box.x1 + f.dx, y1: cand.box.y1 + f.dy } } : {}) };
+  ed.added.push({ partId: partKey(src.part), copy, label, cabinet: src.cabinet ?? src.part.cabinet, x: +at2.x.toFixed(4), y: +at2.y.toFixed(4), rotated: !!at2.rotated,
+    ...(at2.xf ? { xf: at2.xf, box: at2.box, angle: at2.angle, mirror: at2.mirror } : {}) });
+  pend(partKey(src.part), +1, { label, cabinet: src.cabinet ?? src.part.cabinet });
+  moveMsg = `Pasted ${label}${f.snapped ? ' (moved to the nearest spot where it fits)' : ''}.`;
+  renderParts();
+  refreshSheet(item);
+}
+// before nesting again: the new counts become the parts' quantities (and their names)
+function commitPending() {
+  const pq = job.pendingQty || {};
+  for (const [k, q] of Object.entries(pq)) {
+    const p = job.parts.find((x) => partKey(x) === k);
+    if (!p) continue;
+    const named = p.sourceNames && p.sourceNames.length === p.qty;
+    if (named) {
+      for (const r of q.remove) {
+        const k = p.sourceNames.lastIndexOf(r.label);
+        if (k >= 0) { p.sourceNames.splice(k, 1); p.sourceCabinets?.splice(k, 1); }
+      }
+      for (const a of q.add) { p.sourceNames.push(a.label); if (p.sourceCabinets) p.sourceCabinets.push(a.cabinet); }
+    }
+    p.qty = Math.max(0, p.qty + q.delta);
+  }
+  const had = Object.keys(pq).length;
+  delete job.pendingQty;
+  delete job.layoutEdits;
+  if (had) delete job.manualMoves;
+  return had;
+}
+function showMenu(x, y, items) {
+  document.querySelector('#ctxMenu')?.remove();
+  const m = document.createElement('div');
+  m.id = 'ctxMenu';
+  m.className = 'ctx-menu';
+  for (const [text, fn] of items) {
+    const b = document.createElement('button');
+    b.textContent = text;
+    b.onclick = () => { m.remove(); fn(); };
+    m.appendChild(b);
+  }
+  document.body.appendChild(m);
+  const r = m.getBoundingClientRect();
+  m.style.left = `${Math.min(x, innerWidth - r.width - 8)}px`;
+  m.style.top = `${Math.min(y, innerHeight - r.height - 8)}px`;
+  const close = (ev) => { if (!m.contains(ev.target) || ev.key === 'Escape') { m.remove(); removeEventListener('pointerdown', close, true); removeEventListener('keydown', close, true); } };
+  setTimeout(() => { addEventListener('pointerdown', close, true); addEventListener('keydown', close, true); });
 }
 
 // Drag a part: it follows the mouse, red where it can't go, with a dashed
@@ -1011,14 +1130,18 @@ function wireMoveEdit(item, svgEl, fy) {
   };
   let drag = null;
   svgEl.addEventListener('contextmenu', (e) => {
-    const g = e.target.closest('g.pl');
     e.preventDefault();
-    if (!g) return;
-    const pl = sh.placements[+g.dataset.i];
-    if (!pl.moved) return;
-    const m = current();
-    delete m[moveKey(pl)];
-    setSheetMoves(item, m);
+    const g = e.target.closest('g.pl');
+    const pl = g ? sh.placements[+g.dataset.i] : null;
+    const spot = at(e);
+    const items = [];
+    if (pl) {
+      items.push([`Copy ${pl.label || pl.part.name}`, () => { partClip = { pl, group: item.group.key }; moveMsg = `Copied ${pl.label || pl.part.name}: right-click where you want it and Paste.`; renderResults(); }]);
+      items.push([`Delete ${pl.label || pl.part.name}`, () => deletePlaced(item, pl)]);
+      if (pl.moved) items.push(['Put back where the nest had it', () => { const m = current(); delete m[moveKey(pl)]; setSheetMoves(item, m); }]);
+    }
+    if (partClip) items.push([`Paste ${partClip.pl.label || partClip.pl.part.name}`, () => pastePlaced(item, spot)]);
+    if (items.length) showMenu(e.clientX, e.clientY, items);
   });
   svgEl.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;

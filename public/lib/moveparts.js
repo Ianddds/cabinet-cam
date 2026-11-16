@@ -92,32 +92,48 @@ export function moveRoom(sheet, index, o) {
 }
 
 /**
- * Hand moves applied to a sheet: moves = { [part id # copy]: { x, y } } (where
- * the placement's x, y go). Offcuts the moved parts now sit on are trimmed.
+ * Hand changes applied to a sheet: moves = { [part id # copy]: { x, y } } (where
+ * the placement's x, y go); edits = { removed: [part id # copy], added: [placement
+ * records] } (parts deleted from / pasted onto this sheet by hand; an added
+ * record is { partId, copy, label, cabinet, x, y, rotated, xf, box }, resolved
+ * to a part with partOf(id)). Offcuts that moved or added parts now sit on are
+ * trimmed.
  */
-export const moveKey = (pl) => `${pl.part.id}#${pl.copy}`;
-export function applyMoves(sheet, moves, { gap = 0, remnantMin } = {}) {
+/** A part row's key (Onshape ids repeat across split rows; with the name it's unique). */
+export const partKey = (p) => `${p.id}|${p.name}`;
+export const moveKey = (pl) => `${partKey(pl.part)}#${pl.copy}`;
+export function applyMoves(sheet, moves, { gap = 0, remnantMin, edits = null, partOf = null } = {}) {
   if (!sheet.autoPlacements) sheet.autoPlacements = { placements: sheet.placements, offcuts: sheet.offcuts };
   const base = sheet.autoPlacements;
-  if (!moves || !Object.keys(moves).length) {
-    sheet.placements = base.placements;
-    sheet.offcuts = base.offcuts;
-    sheet.offcut = base.offcuts?.[0] || null;
-    sheet.partsMoved = 0;
-    return;
-  }
+  const removed = new Set(edits?.removed || []);
+  const added = (edits?.added || []).map((a) => {
+    const part = partOf?.(a.partId);
+    return part ? { part, copy: a.copy, label: a.label, cabinet: a.cabinet, x: a.x, y: a.y, rotated: !!a.rotated, ...(a.xf ? { xf: { ...a.xf }, box: { ...a.box }, angle: a.angle, mirror: a.mirror, shape: true } : {}), added: true } : null;
+  }).filter(Boolean);
+  const start = removed.size || added.length ? base.placements.filter((pl) => !removed.has(moveKey(pl))).concat(added) : base.placements;
   let n = 0;
-  sheet.placements = base.placements.map((pl) => {
-    const m = moves[moveKey(pl)];
+  sheet.placements = !moves || !Object.keys(moves).length ? start : start.map((pl) => {
+    const m = moves?.[moveKey(pl)];
     if (!m) return pl;
     n++;
     return moveBy(pl, m.x - pl.x, m.y - pl.y);
   });
-  const boxes = sheet.placements.filter((pl) => pl.moved).map((pl) => {
+  sheet.partsMoved = n;
+  sheet.partsAdded = added.length;
+  sheet.partsRemoved = base.placements.length - (start.length - added.length);
+  const boxes = sheet.placements.filter((pl) => pl.moved || pl.added).map((pl) => {
     const g = placedGeometry(pl).box;
     return { x: g.x0 - gap, y: g.y0 - gap, w: g.x1 - g.x0 + 2 * gap, h: g.y1 - g.y0 + 2 * gap };
   });
-  sheet.offcuts = trimOffcuts(base.offcuts || [], boxes, remnantMin || { side: 8, area: 288 });
-  sheet.offcut = sheet.offcuts[0] || null;
-  sheet.partsMoved = n;
+  // at most two kept per sheet, as the nest keeps
+  sheet.offcuts = boxes.length ? trimOffcuts(base.offcuts || [], boxes, remnantMin || { side: 8, area: 288 }).slice(0, 2) : base.offcuts;
+  sheet.offcut = sheet.offcuts?.[0] || null;
+}
+
+/** A copy of placement pl, its middle at (x, y): for pasting. */
+export function copyAt(pl, x, y, extra = {}) {
+  const b = placedGeometry(pl).box;
+  const out = moveBy(pl, x - (b.x0 + b.x1) / 2, y - (b.y0 + b.y1) / 2);
+  delete out.moved;
+  return { ...out, ...extra, added: true };
 }

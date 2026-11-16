@@ -210,3 +210,9 @@ tr.group[data-g]:hover td { filter: brightness(0.97); }
 tr.group .caret { display: inline-block; width: 1em; }
 .parts-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 .parts-foot .spacer { flex: 1; }
+.ctx-menu { position: fixed; z-index: 2000; background: var(--card, #fff); border: 1px solid #0003; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.2); padding: 4px; display: flex; flex-direction: column; min-width: 180px; }
+.ctx-menu button { text-align: left; border: 0; background: none; padding: 6px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
+.ctx-menu button:hover { background: rgba(0,0,0,.07); }
+.move-err { color: #c0392b; font-weight: 600; }
+.move-note { color: #1a7f4b; }
+.badge.pend { background: #fff3cd; color: #7a5b00; }

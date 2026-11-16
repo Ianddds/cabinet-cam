@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import './clipper-node.js';
 import { sampleKitchen, rawPart, sampleCabinetPlaces } from './synthetic.js';
 import { cabinetModel, drawerBoxes, constructionHTML } from '../public/lib/construction.js';
-import { moveRoom, applyMoves, moveKey } from '../public/lib/moveparts.js';
+import { moveRoom, applyMoves, moveKey, partKey } from '../public/lib/moveparts.js';
 import { inRegion, difference, offset, union, area, intersect } from '../public/lib/clip.js';
 import { SHAPE_ORDERS, placeShapes, isShapePart } from '../public/lib/shapes.js';
 import { normalizeAll } from '../lib/parts.js';
@@ -1411,6 +1411,22 @@ for (const g of groupParts(parts)) {
   const dmin = Math.min(...o2.map(([x, y], k) => { const [x2, y2] = o2[(k + 1) % o2.length]; const vx = x2 - x, vy = y2 - y; const t = Math.max(0, Math.min(1, ((scr[0].x - x) * vx + (scr[0].y - y) * vy) / (vx * vx + vy * vy || 1))); return Math.hypot(x + t * vx - scr[0].x, y + t * vy - scr[0].y); }));
   const inPoly = o2.reduce((c, [x, y], k) => { const [x2, y2] = o2[(k + 1) % o2.length]; return ((y > scr[0].y) !== (y2 > scr[0].y) && scr[0].x < ((x2 - x) * (scr[0].y - y)) / (y2 - y) + x) ? !c : c; }, false);
   check(f2.ok && f2.snapped && !inPoly && dmin >= 0.5 - 0.003, `a part dropped on a screw keeps its clearance (${dmin.toFixed(3)}" from the screw)`);
+  // a part deleted from the sheet and one pasted on: the sheet has them, cuts clean
+  {
+    applyMoves(sh, null);
+    const n0 = sh.placements.length;
+    const gone = sh.placements[1];
+    const src = sh.placements[0];
+    const room0 = moveRoom({ ...sh, placements: [...sh.placements, { ...src, copy: 1001 }] }, n0, { gap, screws: [], screwClear: 0 });
+    const f = room0.fit(0, 0);   // on top of the original: goes to the nearest free spot (or none)
+    const edits = { removed: [moveKey(gone)], added: f.ok ? [{ partId: partKey(src.part), copy: 1001, label: 'copy', x: src.x + f.dx, y: src.y + f.dy, rotated: src.rotated }] : [] };
+    applyMoves(sh, null, { gap, edits, partOf: (k) => grp.parts.find((q) => partKey(q) === k) });
+    check(sh.placements.length === n0 - 1 + edits.added.length && !sh.placements.includes(gone) && sh.partsRemoved === 1, `delete / paste on a sheet: ${sh.partsRemoved} deleted, ${sh.partsAdded} pasted`);
+    if (f.ok) check(!tooClose(sh, sh.placements.length - 1, gap) && inside(sh, sh.placements.length - 1), 'a pasted part sits clear of the others');
+    const tp2 = sheetToolpaths(sh, cfgS);
+    const res2 = simCheck(sh, carve(sh, tp2.moves, { res: 0.04, dia: tl.tool.dia }), { dia: tl.dadoTool.dia, profileDia: tl.tool.dia, thickness: grp.thickness, holdDown: 'skin' });
+    check(res2.ok, `a sheet with a part deleted and one pasted cuts clean (${res2.uncut} uncut, ${res2.deep} deep)`);
+  }
   applyMoves(sh, null);
   check(sh.partsMoved === 0 && sh.placements === sh.autoPlacements.placements, 'put back: the nest layout again');
 }
