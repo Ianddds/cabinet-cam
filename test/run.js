@@ -1088,6 +1088,23 @@ for (const g of groupParts(parts)) {
   const ob = bboxOf(out.loops);
   check(Math.abs(areaOf(out.loops) - 2.5) < 0.003 && ob.x0 > 18.75 - 0.005 && out.loops.length === 1,
     `a hole on a dado wall: the floor is filled straight across (area ${areaOf(out.loops).toFixed(4)} of 2.5, left edge ${ob.x0.toFixed(4)})`);
+  // a hole in the inside corner of an L pocket (rabbet meeting a dado): the
+  // corner comes back square, and nothing outside the L is added
+  const L = union([[[0, 0], [2, 0], [2, 0.5], [0, 0.5]]], [[[0, 0], [0.5, 0], [0.5, 2], [0, 2]]], 'nonzero');
+  for (const [cx, cy] of [[0.5, 0.5], [0.6, 0.6], [0.45, 0.45]]) {
+    const fl = difference(L, [circ(cx, cy, r)]);
+    const b2 = bboxOf(fl);
+    const got = fillHoleBites({ loops: fl, depth: 0.25, ...b2 }, [{ cx, cy, d, depth: Infinity }]);
+    const outside = area(difference(got.loops, L));
+    check(Math.abs(area(got.loops) - 1.75) < 0.003 && outside < 1e-4,
+      `a hole at (${cx}, ${cy}) in an L pocket's inside corner: the L comes back as it was (area ${area(got.loops).toFixed(4)} of 1.75, ${outside.toFixed(5)} outside it)`);
+  }
+  // a hole wholly inside the floor: the floor is solid there
+  const inner = fillHoleBites({ loops: difference([dado], [circ(19, 3, 0.1)]), depth: 0.25, x0: 18.75, y0: 0, x1: 19.25, y1: 5 }, [{ cx: 19, cy: 3, d: 0.2, depth: Infinity }]);
+  check(inner.loops.length === 1 && Math.abs(area(inner.loops) - 2.5) < 1e-3, 'a hole inside a dado floor: no island left to cut round');
+  // a hole near a dado but not touching it changes nothing
+  const apart = fillHoleBites(pocket, [{ cx: 18.4, cy: 2, d, depth: Infinity }]);
+  check(apart === pocket, 'a hole beside a dado (not touching it) changes nothing');
   const shallow = fillHoleBites(pocket, [{ cx: 18.75, cy: 0.75, d, depth: 0.1 }]);
   check(shallow === pocket, 'a hole shallower than the floor changes nothing');
   // through the whole pipeline: the dado's moves at floor depth never go round the hole

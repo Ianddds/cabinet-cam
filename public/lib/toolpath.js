@@ -1473,30 +1473,57 @@ function circlePoly(cx, cy, r, n) {
 // the hole (the hole is drilled deeper anyway), so its wall stays straight
 // instead of the cutter going round the hole. Only the part of the hole the
 // floor wraps round is filled: no wider than the hole, never past the wall.
-function hull(pts) {
-  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-  const lower = [], upper = [];
-  for (const q of p) { while (lower.length >= 2 && cr(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop(); lower.push(q); }
-  for (const q of p.reverse()) { while (upper.length >= 2 && cr(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop(); upper.push(q); }
-  return lower.slice(0, -1).concat(upper.slice(0, -1));
-}
 export function fillHoleBites(pocket, circles) {
+  let changed = false;
   let loops = pocket.loops;
   for (const c of circles) {
     if (c.depth < pocket.depth - 1e-3) continue;            // shallower: the pocket cuts it away
     const r = c.d / 2;
     if (c.cx + r < pocket.x0 - 0.01 || c.cx - r > pocket.x1 + 0.01 || c.cy + r < pocket.y0 - 0.01 || c.cy - r > pocket.y1 + 0.01) continue;
-    const disc = [circlePoly(c.cx, c.cy, r + 0.003, 48)];
-    // the floor just round the hole, made convex: its straight walls carried
-    // across the bite
-    const near = intersect(loops, [circlePoly(c.cx, c.cy, r + 0.25, 64)]);
-    if (!near.length) continue;
-    const fill = difference(intersect([hull(near.flat())], disc), loops);
-    if (area(fill) < 1e-5) continue;
-    loops = union(loops, fill);
+    const onArc = (q) => Math.abs(Math.hypot(q[0] - c.cx, q[1] - c.cy) - r) < 0.004;
+    const next = [];
+    for (const l of loops) {
+      const n = l.length;
+      const on = l.map(onArc);
+      if (on.every(Boolean)) { changed = true; continue; }    // the hole inside the floor: floor is solid there
+      if (on.filter(Boolean).length < 3) { next.push(l); continue; }
+      // runs of points on the hole's edge; each is replaced by the floor's own
+      // edges carried on until they meet (straight across for a hole on a wall,
+      // to the corner for a hole in an inside corner)
+      let s0 = on.findIndex((v, i) => !v && on[(i + 1) % n]);
+      const out = [];
+      let i = (s0 + 1) % n, guard = 0;
+      out.push(l[s0]);
+      while (guard++ < n) {
+        if (!on[i]) { if (i === s0) break; out.push(l[i]); i = (i + 1) % n; continue; }
+        const run = [];
+        while (on[i] && run.length < n) { run.push(i); i = (i + 1) % n; }
+        const first = l[run[0]], last = l[run[run.length - 1]];
+        const before = out[out.length - 1], after = l[i];
+        if (run.length < 3) { for (const k of run) out.push(l[k]); continue; }
+        // where the edge before the run and the edge after it meet
+        const d1 = [first[0] - before[0], first[1] - before[1]], d2 = [after[0] - last[0], after[1] - last[1]];
+        const den = d1[0] * d2[1] - d1[1] * d2[0];
+        const L1 = Math.hypot(...d1), L2 = Math.hypot(...d2);
+        let keep = null;
+        if (L1 > 1e-6 && L2 > 1e-6 && Math.abs(den) / (L1 * L2) < 1e-3) {
+          // in line: the wall runs straight on
+          const off = Math.abs((last[0] - first[0]) * d1[1] - (last[1] - first[1]) * d1[0]) / L1;
+          if (off < 0.004) keep = [first, last];
+        } else if (L1 > 1e-6 && L2 > 1e-6) {
+          const t = ((last[0] - first[0]) * d2[1] - (last[1] - first[1]) * d2[0]) / den;
+          const X = [first[0] + t * d1[0], first[1] + t * d1[1]];
+          if (t > 0 && Math.hypot(X[0] - c.cx, X[1] - c.cy) <= r + 0.004) keep = [first, X, last];
+        }
+        if (keep) { out.push(...keep); changed = true; } else for (const k of run) out.push(l[k]);
+      }
+      next.push(out.filter((q, k) => k === 0 || Math.hypot(q[0] - out[k - 1][0], q[1] - out[k - 1][1]) > 1e-7));
+    }
+    loops = next;
   }
-  return loops === pocket.loops ? pocket : { ...pocket, loops: loops.map((l, i) => (i === 0 ? ensureCCW(l) : l)) };
+  if (!changed) return pocket;
+  // the floor was bitten, never grown: what's added is only inside the hole
+  return { ...pocket, loops: loops.map((l, i) => (i === 0 ? ensureCCW(l) : ensureCW(l))) };
 }
 
 export function sheetToolpaths(sheet, cfg) {
