@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import './clipper-node.js';
 import { sampleKitchen, rawPart, sampleCabinetPlaces } from './synthetic.js';
 import { cabinetModel, drawerBoxes, constructionHTML } from '../public/lib/construction.js';
+import { moveRoom, applyMoves, moveKey } from '../public/lib/moveparts.js';
 import { inRegion, difference, offset, union, area, intersect } from '../public/lib/clip.js';
 import { SHAPE_ORDERS, placeShapes, isShapePart } from '../public/lib/shapes.js';
 import { normalizeAll } from '../lib/parts.js';
@@ -1363,6 +1364,55 @@ for (const g of groupParts(parts)) {
     console.log(`rapids (onion ${onion}): ${tot.toFixed(0)} in, baseline ${base}`);
     check(tot <= base * 1.02, `rapid travel went up: ${tot.toFixed(0)} in vs baseline ${base} (onion ${onion})`);
   }
+}
+
+// ---------- moving parts by hand ----------
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const kitchen = normalizeAll(sampleKitchen()).parts;
+  const grp = groupParts(kitchen.filter((p) => p.include)).find((x) => x.key.startsWith('3/4 Baltic'));
+  const gap = s0.sheet.spacing;
+  const nest = nestParts(grp.parts, { ...s0.sheet, respectGrain: true });
+  const sh = nest.sheets[0];
+  const tooClose = (sheet, i, g) => {
+    const mine = placedGeometry(sheet.placements[i]).outline;
+    return sheet.placements.some((q, j) => j !== i && area(intersect(offset([mine], g - 0.003, 'miter'), [placedGeometry(q).outline])) > 1e-6);
+  };
+  const inside = (sheet, i) => {
+    const o = placedGeometry(sheet.placements[i]).outline;
+    return o.every(([x, y]) => x >= sheet.trimX - 1e-6 && x <= sheet.w - sheet.trimX + 1e-6 && y >= sheet.trim - 1e-6 && y <= sheet.h - sheet.trim + 1e-6);
+  };
+  const i = 0, j = 1;
+  const room = moveRoom(sh, i, { gap, screws: [], screwClear: 0 });
+  // onto the next part: snaps clear of it
+  const a = placedGeometry(sh.placements[i]).box, b = placedGeometry(sh.placements[j]).box;
+  const onto = room.fit(b.x0 - a.x0 + 1, b.y0 - a.y0 + 1);
+  const moved = applyMoves(sh, { [moveKey(sh.placements[i])]: { x: sh.placements[i].x + onto.dx, y: sh.placements[i].y + onto.dy } }, { gap }) ?? sh;
+  check(onto.ok && onto.snapped && !tooClose(sh, i, gap) && inside(sh, i), `a part dropped on another snaps to the nearest spot clear of it (moved ${Math.hypot(onto.dx, onto.dy).toFixed(2)}")`);
+  // off the sheet: comes back inside the usable area
+  applyMoves(sh, null);
+  const off = moveRoom(sh, i, { gap, screws: [], screwClear: 0 }).fit(-50, -50);
+  applyMoves(sh, { [moveKey(sh.placements[i])]: { x: sh.placements[i].x + off.dx, y: sh.placements[i].y + off.dy } }, { gap });
+  check(off.ok && inside(sh, i) && !tooClose(sh, i, gap), 'a part dragged off the sheet comes back to the nearest spot on it');
+  // the moved sheet still cuts clean
+  const cfgS = { ...s0, ...tl, holdDown: 'skin', thickness: grp.thickness };
+  const tp = sheetToolpaths(sh, cfgS);
+  const res = simCheck(sh, carve(sh, tp.moves, { res: 0.04, dia: tl.tool.dia }), { dia: tl.dadoTool.dia, profileDia: tl.tool.dia, thickness: grp.thickness, holdDown: 'skin' });
+  check(res.ok, `a sheet with a part moved by hand cuts clean (${res.uncut} uncut, ${res.deep} deep)`);
+  // a screw is kept clear of
+  applyMoves(sh, null);
+  const q = placedGeometry(sh.placements[j]).box;
+  const scr = [{ x: (q.x0 + q.x1) / 2, y: (q.y0 + q.y1) / 2 }];
+  applyMoves(sh, null);
+  const r2 = moveRoom({ ...sh, placements: sh.placements.filter((_, k) => k !== j) }, 0, { gap, screws: scr, screwClear: 0.5 });
+  const f2 = r2.fit(b.x0 - a.x0, b.y0 - a.y0);
+  const o2 = placedGeometry({ ...sh.placements[i], x: sh.placements[i].x + f2.dx, y: sh.placements[i].y + f2.dy }).outline;
+  const dmin = Math.min(...o2.map(([x, y], k) => { const [x2, y2] = o2[(k + 1) % o2.length]; const vx = x2 - x, vy = y2 - y; const t = Math.max(0, Math.min(1, ((scr[0].x - x) * vx + (scr[0].y - y) * vy) / (vx * vx + vy * vy || 1))); return Math.hypot(x + t * vx - scr[0].x, y + t * vy - scr[0].y); }));
+  const inPoly = o2.reduce((c, [x, y], k) => { const [x2, y2] = o2[(k + 1) % o2.length]; return ((y > scr[0].y) !== (y2 > scr[0].y) && scr[0].x < ((x2 - x) * (scr[0].y - y)) / (y2 - y) + x) ? !c : c; }, false);
+  check(f2.ok && f2.snapped && !inPoly && dmin >= 0.5 - 0.003, `a part dropped on a screw keeps its clearance (${dmin.toFixed(3)}" from the screw)`);
+  applyMoves(sh, null);
+  check(sh.partsMoved === 0 && sh.placements === sh.autoPlacements.placements, 'put back: the nest layout again');
 }
 
 // ---------- construction sheets ----------

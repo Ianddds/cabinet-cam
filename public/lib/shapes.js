@@ -525,3 +525,6 @@ function boxOf(pl) {
   const w = pl.rotated ? pl.part.height : pl.part.width, h = pl.rotated ? pl.part.width : pl.part.height;
   return { x0: pl.x, y0: pl.y, x1: pl.x + w, y1: pl.y + h };
 }
+
+// shared with moveparts.js (dragging parts by hand)
+export { sweep as sweepAround, clip as clipPaths, grow as growPaths, trimOffcuts, toPath, fromPath, SCALE };

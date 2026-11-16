@@ -195,3 +195,11 @@ td select.overridden { border-color: var(--accent); color: var(--accent); }
 .out-folder a { margin: 0 2px; }
 .pp-doc { flex: 1; overflow: auto; padding: 20px 0; background: #5f6368; }
 .pp-doc canvas { display: block; margin: 0 auto 20px; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.45); }
+
+/* moving parts by hand */
+.sheet-svg.move-edit g.pl { cursor: grab; }
+.sheet-svg.move-edit g.pl:active { cursor: grabbing; }
+.sheet-svg.move-edit text { pointer-events: none; user-select: none; }
+.sheet-svg g.pl.moved .part { stroke-dasharray: 0.6 0.3; }
+.sheet-svg g.pl.bad .part { fill: rgba(220, 40, 40, 0.35); }
+.sheet-svg .ghost { fill: rgba(30, 160, 90, 0.18); stroke: #1a9c5a; stroke-width: 0.12; stroke-dasharray: 0.5 0.3; pointer-events: none; }
