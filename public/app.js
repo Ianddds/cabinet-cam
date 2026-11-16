@@ -2,14 +2,14 @@ import { DEFAULT_SETTINGS, groupParts, mergeSettings, holdDownOf, usesSkin, uses
 import { carve, check, shade } from './lib/sim.js';
 import { nestParts, applySolution, nestKey, placedGeometry, partExits, rectMinus, compareKeep } from './lib/nest.js';
 import { placeShapes, isShapePart, labelPoint, SHAPE_ORDERS } from './lib/shapes.js';
-import { sheetToolpaths, screwR, rectsOutline, screwCheck } from './lib/toolpath.js';
+import { sheetToolpaths, screwR, rectsOutline, screwCheck, offcutCutLines } from './lib/toolpath.js';
 import { post, postWithWarnings, fileExtension, SBP_MAX_TOOL, toolNumberOk } from './lib/post.js';
 import { parsePP } from './lib/vpp.js';
 import { DEFAULT_LIBRARY, TOOL_FIELDS, newTool, resolveTools } from './lib/tools.js';
 import { cutListRows, cutListCSV, fraction, roleName } from './lib/cutlist.js';
 import { layoutsHTML } from './lib/printsheets.js';
 import { constructionHTML } from './lib/construction.js';
-import { moveRoom, applyMoves, moveKey, copyAt, partKey } from './lib/moveparts.js';
+import { moveRoom, applyMoves, moveKey, copyAt, partKey, screwRoom } from './lib/moveparts.js';
 import { sheetLabels, remnantLabel, toZPL, labelSVG, numberPlacements } from './lib/labels.js';
 import { GRAIN_CHOICES, grainLabel, effectiveGrain, applyGrain, splitPart, carryOverrides, roleKey } from './lib/grain.js';
 
@@ -952,18 +952,31 @@ function renderSheet(item) {
       <span class="legend"><span><i style="background:var(--path)"></i>cut</span><span><i style="background:var(--rapid)"></i>rapid</span><span><i style="background:var(--pocket)"></i>dado</span><span><i style="background:var(--drill)"></i>drill</span>${usesTabs(item.cfg) ? '<span><i style="background:var(--tab)"></i>tab</span>' : ''}</span>
       <button id="moveEditBtn" class="${moveEdit ? 'active' : ''}" ${job.cut || results.pendingShapes ? 'disabled' : ''} title="${job.cut ? 'The job is marked as cut: its layout is fixed' : 'Drag parts by hand on this sheet. A part dropped too close to another part, a screw or the edge goes to the nearest spot where it fits.'}">${moveEdit ? 'Done moving' : 'Move parts'}</button>
       <button id="screwEditBtn" class="${screwEdit ? 'active' : ''}" title="Place hold-down screws by hand on this sheet: click to add, drag to move, right-click to remove">${screwEdit ? 'Done placing screws' : 'Place screws'}</button>
+      <button id="runSimBtn" ${results.pendingShapes ? 'disabled' : ''} title="Play this sheet's file in 3D the way the machine will run it">Run simulation</button>
       <button id="printSheet">Print layout</button>
       ${desk ? `<button id="saveSheet" class="primary" ${results.pendingShapes ? 'disabled' : ''} title="Write this sheet's file into the G-code folder">Save to folder</button>` : ''}
       <button id="dlSheet" class="${desk ? '' : 'primary'}" ${results.pendingShapes ? 'disabled title="Custom shapes are still being fitted"' : ''}>Download ${esc(item.file)}</button>
     </div>${svg}
     ${simNote}
     ${moveEdit ? `<p class="small screw-help">Moving parts: drag a part where you want it. If it would come too close to another part's cut, a hold-down screw or the edge of the stock, it goes to the nearest spot where it fits (dashed outline while dragging). Right-click a part to copy, delete or put it back; right-click a spot to paste. ${sh.partsMoved || 0} moved${sh.partsAdded ? `, ${sh.partsAdded} pasted` : ''}${sh.partsRemoved ? `, ${sh.partsRemoved} deleted` : ''} on this sheet. <button id="moveReset" ${sh.partsMoved ? '' : 'disabled'}>Put all back</button>${moveMsg ? `<br><span class="${moveMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(moveMsg.replace(/^!/, ''))}</span>` : ''}${job.pendingQty && Object.keys(job.pendingQty).length ? '<br><strong>Parts added or deleted: Nest &amp; toolpath nests again with the new counts.</strong> Until then deleted parts leave their spot empty and pasted ones stay where you put them.' : ''}</p>` : ''}
-    ${screwEdit ? `<p class="small screw-help">Placing screws: click an empty spot to add one, drag to move, right-click to remove. Red = a cut or part is too close. ${sh.screws?.length || 0} on this sheet${sh.screwsManual ? ' (placed by hand)' : ''}. <button id="screwAuto" ${sh.screwsManual ? '' : 'disabled'}>Back to automatic</button> <button id="screwClear" ${sh.screws?.length ? '' : 'disabled'}>Remove all</button></p>` : ''}
+    ${screwEdit ? `<p class="small screw-help">Placing screws: click an empty spot to add one, drag to move, right-click to remove. A screw dropped too close to a cut goes to the nearest spot clear of it. Red = a cut or part is too close. ${sh.screws?.length || 0} on this sheet${sh.screwsManual ? ' (placed by hand)' : ''}. <button id="screwAuto" ${sh.screwsManual ? '' : 'disabled'}>Back to automatic</button> <button id="screwClear" ${sh.screws?.length ? '' : 'disabled'}>Remove all</button>${screwMsg ? `<br><span class="${screwMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(screwMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
     ${sh.remnant ? `<p class="small"><strong>Remnant R${sh.remnant.no ?? '?'}</strong> (${fraction(sh.w)} × ${fraction(sh.h)}): put its zero corner (the one that was the sheet's zero corner) at the origin, grain along X.</p>` : ''}
     <p class="muted small">Origin (red dot) is front-left of the ${sh.remnant ? 'remnant' : 'sheet'}, X along the ${s.sheetW}" side. Z0 = ${item.cfg.zZero === 'table' ? 'spoilboard' : 'material top'}. Air-cut new posts before running material.</p>`;
   $('#dlSheet').onclick = () => download(item.file, textFor(item));
   if (desk) $('#saveSheet').onclick = () => saveToFolder([item]);
   $('#printSheet').onclick = () => printLayouts([item]);
+  $('#runSimBtn').onclick = async () => {
+    const btn = $('#runSimBtn');
+    btn.disabled = true;
+    try {
+      const { openRunSim } = await import('./lib/runsim.js');
+      const sbp = /\.sbp$/i.test(item.file);
+      const tools = item.tp.moves.filter((m) => m.toolchange).map((m) => ({ name: m.tool?.name || String(m.note || '').replace(/^Tool:\s*/, ''), dia: m.tool?.dia }));
+      openRunSim({ text: textFor(item), kind: sbp ? 'sbp' : 'gcode', cfg: item.cfg, sheet: item.sheet, title: `${item.title} · ${item.file}`, tools });
+    } catch (e) {
+      showMessages([{ error: true, text: `Couldn't simulate: ${e.message}` }]);
+    } finally { btn.disabled = false; }
+  };
   $('#screwEditBtn').onclick = () => { screwEdit = !screwEdit; if (screwEdit) moveEdit = false; renderResults(); };
   $('#moveEditBtn').onclick = () => { moveEdit = !moveEdit; if (moveEdit) screwEdit = false; renderResults(); };
   if (moveEdit && !job.cut && !results.pendingShapes) {
@@ -1010,6 +1023,7 @@ function refreshSheet(item) {
 // list shows the new count (job.pendingQty: per part id { delta, add, remove }).
 let partClip = null;   // { pl, group } copied in Move parts
 let moveMsg = '';      // the last copy / paste / delete note, shown under the sheet
+let screwMsg = '';     // where a screw went, when it snapped
 const pendingOf = (p) => job.pendingQty?.[partKey(p)]?.delta || 0;
 const effQty = (p) => Math.max(0, (p.qty || 0) + pendingOf(p));
 function sheetEdits(item) {
@@ -1057,7 +1071,7 @@ function pastePlaced(item, spot) {
   const sh = item.sheet;
   const tmp = { ...sh, placements: [...sh.placements, cand] };
   const screws = screwsShown(item.cfg, sh) ? sh.screws || [] : [];
-  const f = moveRoom(tmp, tmp.placements.length - 1, { gap: (q) => partGap(item.cfg, cand, q), screws, screwClear: screwR(item.cfg.screws || {}) + item.cfg.tool.dia / 2 }).fit(0, 0);
+  const f = moveRoom(tmp, tmp.placements.length - 1, { gap: (q) => partGap(item.cfg, cand, q), screws, screwClear: screwR(item.cfg.screws || {}) + item.cfg.tool.dia }).fit(0, 0);
   if (!f.ok) {
     moveMsg = `!No room for another ${base} on this sheet. Delete or move parts to make room, or add it in the parts list and nest again.`;
     renderResults();
@@ -1151,7 +1165,7 @@ function wireMoveEdit(item, svgEl, fy) {
     const i = +g.dataset.i;
     const pl = sh.placements[i];
     const screws = screwsShown(item.cfg, sh) ? sh.screws || [] : [];
-    const room = moveRoom(sh, i, { gap: (q) => partGap(item.cfg, pl, q), screws, screwClear: screwR(item.cfg.screws || {}) + item.cfg.tool.dia / 2 });
+    const room = moveRoom(sh, i, { gap: (q) => partGap(item.cfg, pl, q), screws, screwClear: screwR(item.cfg.screws || {}) + item.cfg.tool.dia });
     const ghost = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
     ghost.setAttribute('class', 'ghost');
     ghost.setAttribute('points', g.querySelector('polygon.part').getAttribute('points'));
@@ -1199,6 +1213,17 @@ function wireScrewEdit(item, svgEl, fy) {
     return { x: Math.round(p.x * 100) / 100, y: Math.round(fy(p.y) * 100) / 100 };
   };
   const list = () => (sh.screws || []).map((q) => ({ x: q.x, y: q.y }));
+  // screws snap to the nearest spot clear of every cut and on the stock
+  let roomC = null;
+  const room = () => {
+    if (!roomC) {
+      const toolR = item.cfg.tool.dia / 2;
+      const lines = item.cfg.remnants?.cutFree ? (sh.offcuts || []).flatMap((oc) => offcutCutLines(oc, sh.w, sh.h, toolR).map((l) => (l.closed ? [...l.pts, l.pts[0]] : l.pts))) : [];
+      roomC = screwRoom(sh, { clear: screwR(item.cfg.screws || {}), head: (item.cfg.screws?.head || 0.375) / 2, toolR, lines });
+    }
+    return roomC;
+  };
+  const snapNote = (f) => { if (!f.ok) { screwMsg = '!No room for a screw anywhere near there.'; } else screwMsg = f.snapped ? 'Moved to the nearest spot clear of the cuts.' : ''; };
   let drag = null;
   svgEl.addEventListener('contextmenu', (e) => {
     const g = e.target.closest('g.screw');
@@ -1215,14 +1240,21 @@ function wireScrewEdit(item, svgEl, fy) {
     const l = list();
     let k;
     if (g) k = +g.dataset.k;
-    else { l.push(at(e)); setSheetScrews(item, l); return; }
+    else {
+      const p = at(e), f = room().fit(p.x, p.y);
+      snapNote(f);
+      if (f.ok) { l.push({ x: f.x, y: f.y }); setSheetScrews(item, l); } else renderResults();
+      return;
+    }
     drag = { k, l, g, moved: false };
     svgEl.setPointerCapture(e.pointerId);
   });
   svgEl.addEventListener('pointermove', (e) => {
     if (!drag) return;
-    const p = at(e);
+    const m = at(e), f = room().fit(m.x, m.y);
+    const p = f.ok ? { x: f.x, y: f.y } : m;
     drag.l[drag.k] = p;
+    drag.f = f;
     drag.moved = true;
     drag.g.setAttribute('transform', `translate(${p.x} ${fy(p.y)})`);
     const c = screwCheck({ ...sh, screws: [p] }, item.tp.moves, item.cfg)[0];
@@ -1232,7 +1264,10 @@ function wireScrewEdit(item, svgEl, fy) {
     if (!drag) return;
     const d = drag;
     drag = null;
-    if (d.moved) setSheetScrews(item, d.l);
+    if (!d.moved) return;
+    snapNote(d.f || { ok: true });
+    if (d.f && !d.f.ok) { renderResults(); return; }   // nowhere near: it stays where it was
+    setSheetScrews(item, d.l);
   };
   svgEl.addEventListener('pointerup', end);
   svgEl.addEventListener('pointercancel', end);

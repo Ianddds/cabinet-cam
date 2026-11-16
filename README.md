@@ -219,6 +219,18 @@ On any sheet, **Place screws** (above the layout) lets you put the hold-down scr
 
 **Copy, paste and delete** (right-click in Move parts): right-click a part for **Copy**, **Delete** or **Put back**; right-click anywhere on a sheet of the same material for **Paste**. A pasted copy goes where you clicked, or the nearest spot where it fits; if there's no room on that sheet it isn't added and the sheet says so. Each copy or delete changes the part's count in the parts list right away (marked "+1 on sheet" / "−1 on sheet"). Until you click **Nest & toolpath** the sheets stay as you left them: a deleted part leaves its spot empty and a pasted one is cut where you put it. **Nest & toolpath** then makes the new counts the parts' quantities (pasted copies named "… copy") and nests everything again. Changing anything in the parts list does the same.
 
+### Run simulation
+
+**Run simulation** (above each sheet) plays that sheet's file in 3D the way the machine will run it — the actual posted file (FluidNC / LinuxCNC G-code, ShopBot .sbp, or a .pp post's G-code), read back line by line, not the toolpath it was made from. Timing comes from the Machine card (top speeds, accelerations, cornering), so the clock matches the time estimate.
+
+- The sheet with its parts outlined, the bit (its real diameter, changing at each bit change) and spindle, the path run so far (cuts blue, rapids red) and the material being cut away (darker = deeper, grey = cut through).
+- A DRO (X, Y, Z in the file's coordinates), the actual feed (slowing into corners and plunges), spindle, bit, and what it's doing (rapid, plunge, cutting, bit change, stopped).
+- The G-code lines around the one running, highlighted.
+- **Play / pause** (space bar), **speed** 1× to 100×, the **timeline** to drag anywhere, **⏮** back to the start, **⏭** on to the next stop. **Stop at stops**: it halts where the machine would wait for you (bit changes, the screw stop) with the message the file shows; **Continue** carries on.
+- Views: **Top**, **3D** (drag to turn, right-drag to pan, wheel to zoom) and **Follow tool**. **Material** and **Path** can be turned off.
+
+Built on three.js (`public/lib/vendor/three`, bundled so it works offline).
+
 ## Holes
 
 Round holes are found from the geometry (no tagging needed) and matched against the **Drills** list in settings plus the loaded router bits (within 0.006"):

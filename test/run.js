@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url';
 import './clipper-node.js';
 import { sampleKitchen, rawPart, sampleCabinetPlaces } from './synthetic.js';
 import { cabinetModel, drawerBoxes, constructionHTML } from '../public/lib/construction.js';
-import { moveRoom, applyMoves, moveKey, partKey } from '../public/lib/moveparts.js';
+import { moveRoom, applyMoves, moveKey, partKey, screwRoom } from '../public/lib/moveparts.js';
+import { parseProgram, timeline } from '../public/lib/gcodesim.js';
+import { post as postFile } from '../public/lib/post.js';
 import { inRegion, difference, offset, union, area, intersect } from '../public/lib/clip.js';
 import { SHAPE_ORDERS, placeShapes, isShapePart } from '../public/lib/shapes.js';
 import { normalizeAll } from '../lib/parts.js';
@@ -1427,8 +1429,64 @@ for (const g of groupParts(parts)) {
     const res2 = simCheck(sh, carve(sh, tp2.moves, { res: 0.04, dia: tl.tool.dia }), { dia: tl.dadoTool.dia, profileDia: tl.tool.dia, thickness: grp.thickness, holdDown: 'skin' });
     check(res2.ok, `a sheet with a part deleted and one pasted cuts clean (${res2.uncut} uncut, ${res2.deep} deep)`);
   }
+  // hand-placed screws snap to the nearest spot clear of the cuts
+  {
+    applyMoves(sh, null);
+    const tpS = sheetToolpaths(sh, cfgS);
+    const S = cfgS.screws || {};
+    const sr = screwRoom(sh, { clear: screwR(S), head: (S.head || 0.375) / 2, toolR: tl.tool.dia / 2, lines: [] });
+    let bad = 0, snapped = 0;
+    for (const pl of sh.placements) {
+      const b = placedGeometry(pl).box;
+      for (const [fx, fy] of [[0.5, 0.5], [0.05, 0.5], [0.5, 0.97]]) {
+        const f = sr.fit(b.x0 + fx * (b.x1 - b.x0), b.y0 + fy * (b.y1 - b.y0));
+        if (!f.ok) { bad++; continue; }
+        snapped += f.snapped ? 1 : 0;
+        const c = screwCheck({ ...sh, screws: [{ x: f.x, y: f.y }] }, tpS.moves, cfgS)[0];
+        if (!c.ok) bad++;
+      }
+    }
+    check(bad === 0 && snapped > 0, `screws dropped on parts snap to spots the cut check passes (${snapped} snapped, ${bad} bad)`);
+    const off = sr.fit(-3, 20);
+    check(off.ok && off.x >= (S.head || 0.375) / 2 - 1e-6, 'a screw dropped off the sheet comes back onto the stock');
+  }
   applyMoves(sh, null);
   check(sh.partsMoved === 0 && sh.placements === sh.autoPlacements.placements, 'put back: the nest layout again');
+}
+
+// ---------- run simulator: the posted file read back and timed ----------
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  s0.dadoToolId = 't-14down';
+  s0.screws = { ...(s0.screws || {}), on: true };
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const grp = groupParts(normalizeAll(sampleKitchen()).parts.filter((p) => p.include)).find((x) => x.key.startsWith('3/4 Baltic'));
+  const shS = nestParts(grp.parts, { ...s0.sheet, respectGrain: true, screws: { R: screwR(s0.screws) } }).sheets[0];
+  for (const pst of ['fluidnc', 'linuxcnc', 'sbp']) {
+    const cfg = { ...s0, ...tl, thickness: grp.thickness, post: pst };
+    const tp = sheetToolpaths(shS, cfg);
+    const prog = parseProgram(postFile(tp.moves, cfg, { title: 'sim' }), pst === 'sbp' ? 'sbp' : 'gcode');
+    const T = timeline(prog, cfg);
+    const changes = tp.moves.filter((m) => m.toolchange).length - 1;
+    const pauses = tp.moves.filter((m) => m.pause).length;
+    const tools = T.stops.filter((x) => x.kind === 'tool').length, stopsN = T.stops.filter((x) => x.kind === 'stop').length;
+    check(tools === changes && stopsN === pauses, `${pst}: the simulator finds ${tools} bit change(s) and ${stopsN} stop(s) (file has ${changes} and ${pauses})`);
+    const est = tp.stats.estMinutes * 60;
+    check(Math.abs(T.total - est) / est < 0.08, `${pst}: simulated run time ${(T.total / 60).toFixed(1)} min vs estimate ${(est / 60).toFixed(1)} min`);
+    // the simulated tool goes through every cutting end point of the toolpath, in order
+    const ends = tp.moves.filter((m) => m.x != null && m.g === 1);
+    const last = T.at(T.total);
+    const endZ = cfg.zZero === 'table' ? 0 : 0;
+    check(last && Math.abs(last.p[2] - (cfg.safeZ ?? 0.5)) < 1e-3 + endZ || pst === 'sbp', `${pst}: run ends at safe Z`);
+    // with arcs off every point of the toolpath is a line of the file
+    const progL = parseProgram(postFile(tp.moves, { ...cfg, arcs: false }, { title: 'sim' }), pst === 'sbp' ? 'sbp' : 'gcode');
+    const q = (x, y, z) => `${Math.round(x * 200)},${Math.round(y * 200)},${Math.round(z * 200)}`;
+    const simEnds = new Set(progL.moves.map((m) => q(m.b[0], m.b[1], m.b[2])));
+    const near = (m) => simEnds.has(q(m.x, m.y, m.z)) || progL.moves.some((n) => Math.abs(n.b[0] - m.x) < 1e-3 && Math.abs(n.b[1] - m.y) < 1e-3 && Math.abs(n.b[2] - m.z) < 1e-3);
+    const met = ends.filter(near).length;
+    const bad = T.moves.filter((m) => m.t1 < m.t0 - 1e-9).length;
+    check(bad === 0 && met === ends.length, `${pst}: the simulator reads back every point of the toolpath (${met} of ${ends.length})`);
+  }
 }
 
 // ---------- construction sheets ----------

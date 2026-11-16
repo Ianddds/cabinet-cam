@@ -216,3 +216,31 @@ tr.group .caret { display: inline-block; width: 1em; }
 .move-err { color: #c0392b; font-weight: 600; }
 .move-note { color: #1a7f4b; }
 .badge.pend { background: #fff3cd; color: #7a5b00; }
+
+/* run simulator */
+.runsim { position: fixed; inset: 0; z-index: 1100; display: flex; flex-direction: column; background: #1f2329; color: #e8eaed; }
+.runsim .muted { color: #9aa0a6; }
+.rs-bar, .rs-ctl { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: #2b2f36; }
+.rs-bar .spacer { flex: 1; }
+.rs-ctl input[type=range] { flex: 1; }
+.runsim button { background: #3a404a; color: #e8eaed; border: 1px solid #4a515c; border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+.runsim button.primary { background: #2f7fe0; border-color: #2f7fe0; }
+.runsim button.active { outline: 2px solid #2f7fe0; }
+.runsim select { background: #3a404a; color: #e8eaed; border: 1px solid #4a515c; border-radius: 4px; }
+.rs-views button { margin-left: 4px; }
+.rs-main { flex: 1; display: flex; min-height: 0; }
+.rs-canvas { flex: 1; min-width: 0; position: relative; }
+.rs-canvas canvas { display: block; }
+.rs-side { width: 330px; display: flex; flex-direction: column; gap: 8px; padding: 10px; background: #252a31; min-height: 0; }
+.rs-dro { display: grid; gap: 4px; background: #111418; border-radius: 8px; padding: 8px 12px; font-variant-numeric: tabular-nums; }
+.rs-dro div { display: flex; justify-content: space-between; align-items: baseline; }
+.rs-dro span { color: #9aa0a6; font-weight: 600; }
+.rs-dro b { font: 600 26px ui-monospace, Consolas, monospace; color: #7ee787; }
+.rs-info div { margin: 2px 0; }
+.rs-state { font-weight: 600; color: #f2cc60; }
+.rs-msg { background: #5a4410; border: 1px solid #a07c1e; border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.rs-code { flex: 1; overflow: hidden; margin: 0; background: #111418; border-radius: 6px; padding: 6px 0; font: 12px/1.5 ui-monospace, Consolas, monospace; }
+.rs-code div { padding: 0 8px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.rs-code div.cur { background: #2f7fe0; color: #fff; }
+.rs-code i { display: inline-block; width: 3.5em; color: #6b7280; font-style: normal; }
+.rs-code div.cur i { color: #dbe8ff; }

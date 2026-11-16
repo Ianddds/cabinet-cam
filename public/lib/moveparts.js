@@ -137,3 +137,67 @@ export function copyAt(pl, x, y, extra = {}) {
   delete out.moved;
   return { ...out, ...extra, added: true };
 }
+
+/**
+ * Where a hold-down screw can go on a sheet: on the stock (its head clear of
+ * the edge), and no cut within its clearance — every part's outline cut and the
+ * lines that cut kept offcuts free. (Dado run-outs give way to screws when the
+ * toolpath is redone, so they don't count.) o: { clear: screw clearance radius,
+ * head: head radius, toolR: profile bit radius, lines: [[x, y]...] polylines cut
+ * through (offcut lines, already at the bit's centre) }.
+ * Returns fit(x, y) -> { x, y, snapped, ok }: the spot itself if it's fine, else
+ * the nearest one that is.
+ */
+export function screwRoom(sheet, o) {
+  const L = C();
+  const W = sheet.w, H = sheet.h;
+  const stock = sheet.remnant?.rects?.length > 1 ? sheet.remnant.rects : [{ x: 0, y: 0, w: W, h: H }];
+  const areas = stock.map((t) => ({ x0: t.x + o.head, y0: t.y + o.head, x1: t.x + t.w - o.head, y1: t.y + t.h - o.head })).filter((r) => r.x1 >= r.x0 && r.y1 >= r.y0);
+  const e = 1 / SCALE;
+  const areaPaths = areas.map((r) => toPath([[r.x0, r.y0], [r.x1 + e, r.y0], [r.x1 + e, r.y1 + e], [r.x0, r.y1 + e]]));
+  // the outline cut's bit centre is a radius out from the part, its far edge a diameter
+  const keep = o.clear + 2 * o.toolR;
+  let blocked = sheet.placements.flatMap((pl) => growPaths([toPath(placedGeometry(pl).outline)], keep));
+  if (o.lines?.length) {
+    const co = new L.ClipperOffset(2, 0.001 * SCALE);
+    for (const ln of o.lines) co.AddPath(toPath(ln), L.JoinType.jtRound, L.EndType.etOpenRound);
+    const out = new L.Paths();
+    co.Execute(out, (o.clear + o.toolR) * SCALE);
+    blocked.push(...out);
+  }
+  blocked = blocked.length ? clipPaths(L.ClipType.ctUnion, blocked, []) : [];
+  const free = blocked.length ? clipPaths(L.ClipType.ctDifference, areaPaths, blocked) : areaPaths;
+  const signs = blocked.map((b) => (L.Clipper.Orientation(b) ? 1 : -1));
+  const isBlocked = (q) => {
+    let w = 0;
+    for (let i = 0; i < blocked.length; i++) if (L.Clipper.PointInPolygon(q, blocked[i]) === 1) w += signs[i];
+    return w > 0;
+  };
+  const inArea = (x, y) => areas.some((r) => x >= r.x0 - 1e-6 && x <= r.x1 + 1e-6 && y >= r.y0 - 1e-6 && y <= r.y1 + 1e-6);
+  const fits = (x, y) => inArea(x, y) && !isBlocked({ X: Math.round(x * SCALE), Y: Math.round(y * SCALE) });
+  const edges = [];
+  for (const poly of free) for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    edges.push([a.X / SCALE, a.Y / SCALE, b.X / SCALE, b.Y / SCALE]);
+  }
+  const fit = (x, y) => {
+    if (fits(x, y)) return { x, y, snapped: false, ok: true };
+    const cand = [];
+    for (const [ax, ay, bx, by] of edges) {
+      const vx = bx - ax, vy = by - ay, L2 = vx * vx + vy * vy;
+      const t = L2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * vx + (y - ay) * vy) / L2)) : 0;
+      cand.push([Math.hypot(ax + t * vx - x, ay + t * vy - y), ax + t * vx, ay + t * vy]);
+    }
+    cand.sort((p, q) => p[0] - q[0]);
+    // a hair inside the free area (0.005"), so the clearance check never comes out short
+    for (const [, cx, cy] of cand.slice(0, 60)) {
+      const dx = cx - x, dy = cy - y, d = Math.hypot(dx, dy) || 1;
+      for (const k of [0.005, 0.01, 0.02, 0]) {
+        const px = cx + (dx / d) * k, py = cy + (dy / d) * k;
+        if (fits(px, py)) return { x: +px.toFixed(3), y: +py.toFixed(3), snapped: true, ok: true };
+      }
+    }
+    return { x, y, snapped: true, ok: false };
+  };
+  return { fit, free };
+}
