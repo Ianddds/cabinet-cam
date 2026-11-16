@@ -244,3 +244,9 @@ tr.group .caret { display: inline-block; width: 1em; }
 .rs-code div.cur { background: #2f7fe0; color: #fff; }
 .rs-code i { display: inline-block; width: 3.5em; color: #6b7280; font-style: normal; }
 .rs-code div.cur i { color: #dbe8ff; }
+
+/* tabs on the sheet */
+.sheet-svg .tabmark rect { fill: #f2a33a; stroke: #8a5410; stroke-width: 0.04; opacity: 0.9; }
+.sheet-svg.tab-edit .tabmark { cursor: grab; }
+.sheet-svg .tabmark .tabhit { fill: transparent; }
+.sheet-svg.tab-edit { cursor: crosshair; }

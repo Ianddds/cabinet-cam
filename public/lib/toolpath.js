@@ -1198,6 +1198,60 @@ export function planSheetTabs(items, tool, sheet, warnings = []) {
   for (const me of info) if (me.runs) me.x.tabs = { ...me.x.tabs, spans: me.spans };
 }
 
+// Hand-placed tabs: each spot goes on the nearest outline path (the bit's
+// centre) within an inch, along the straight edge it lands on, kept clear of
+// the edge's ends; on a line two parts share it holds both (a shared bridge).
+// Parts without a hand-placed tab get none.
+export const TAB_REACH = 1;
+export function tabOnPaths(paths, q, tool, opt) {
+  const r = tool.dia / 2, lift = opt.length + tool.dia, ramp = opt.ramp || 0;
+  const hits = [];
+  paths.forEach((L, pi) => {
+    if (!L) return;
+    for (let i = 0; i < L.length; i++) {
+      const a = L[i], b = L[(i + 1) % L.length];
+      const len = dist(a, b);
+      if (len < 1e-9) continue;
+      const u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+      const t = Math.max(0, Math.min(len, (q[0] - a[0]) * u[0] + (q[1] - a[1]) * u[1]));
+      const p = [a[0] + u[0] * t, a[1] + u[1] * t];
+      const d = dist(p, q);
+      if (d <= TAB_REACH) hits.push({ pi, a, u, len, t, d });
+    }
+  });
+  if (!hits.length) return null;
+  const best = hits.reduce((m, h) => (h.d < m.d ? h : m));
+  const half = lift / 2 + ramp + r;
+  if (best.len < 2 * half) return { short: true, pi: best.pi };
+  const t = Math.max(half, Math.min(best.len - half, best.t));
+  const c = [best.a[0] + best.u[0] * t, best.a[1] + best.u[1] * t];
+  const at = (h, tt) => [h.a[0] + h.u[0] * tt, h.a[1] + h.u[1] * tt];
+  // every path running along the same line here (shared cut lines)
+  const on = hits.filter((h) => {
+    const tt = (c[0] - h.a[0]) * h.u[0] + (c[1] - h.a[1]) * h.u[1];
+    return tt >= lift / 2 + ramp - 1e-6 && tt <= h.len - lift / 2 - ramp + 1e-6 && dist(at(h, tt), c) < 0.004 && Math.abs(h.u[0] * best.u[1] - h.u[1] * best.u[0]) < 1e-3;
+  }).map((h) => { const tt = (c[0] - h.a[0]) * h.u[0] + (c[1] - h.a[1]) * h.u[1]; return { pi: h.pi, span: [at(h, tt - lift / 2), at(h, tt + lift / 2)] }; });
+  return { c, on: on.length ? on : [{ pi: best.pi, span: [at(best, t - lift / 2), at(best, t + lift / 2)] }] };
+}
+function placeManualTabs(items, tool, opt, list, warnings) {
+  for (const x of items) x.tabs = null;
+  if (!opt || !list.length) return;
+  const paths = items.map((x) => x.loops[x.loops.length - 1]);
+  let lost = 0, short = 0;
+  for (const q of list) {
+    const hit = tabOnPaths(paths, [q.x, q.y], tool, opt);
+    if (!hit) { lost++; continue; }
+    if (hit.short) { short++; continue; }
+    for (const { pi, span } of hit.on) {
+      const x = items[pi];
+      if (!x.tabs) x.tabs = { ...opt, spans: [] };
+      x.tabs.spans.push(span);
+    }
+  }
+  if (lost) warnings.push(`${lost} hand-placed tab${lost === 1 ? ' isn\'t' : 's aren\'t'} near any part's outline any more — not cut`);
+  if (short) warnings.push(`${short} hand-placed tab${short === 1 ? ' is' : 's are'} on an edge too short for a tab — not cut`);
+}
+
 // a sheet plan's tab spans as arc-length intervals on this (rotated) loop
 function spansToIntervals(loop, spans) {
   const out = [];
@@ -1978,7 +2032,10 @@ export function sheetToolpaths(sheet, cfg) {
     return out;
   };
   // tabs: on parts under maxArea sq in (0 = every part); tab top = material left at the bottom
-  const tabsOn = usesTabs(cfg) && !!cfg.tabs;
+  // hand-placed tabs (sheet.tabsManual, a list of { x, y }) take the place of the
+  // automatic ones on this sheet, and are cut even when the job holds parts another way
+  const manualTabs = Array.isArray(sheet.tabsManual) ? sheet.tabsManual : null;
+  const tabsOn = (usesTabs(cfg) || (manualTabs && manualTabs.length > 0)) && !!cfg.tabs;
   const tabCfg = tabsOn && cfg.tabs.length > 0 && cfg.tabs.thickness > 0 && cfg.tabs.thickness < T
     ? { ...cfg.tabs, z: -(T - cfg.tabs.thickness) } : null;
   if (tabsOn && !tabCfg) warnings.push('Tabs are on but need a length above zero and a thickness between 0 and the material thickness — no tabs cut');
@@ -1988,7 +2045,15 @@ export function sheetToolpaths(sheet, cfg) {
     return { ...x, pi, loops: loopsFor(x), area: a, tabs, center: [(x.g.box.x0 + x.g.box.x1) / 2, (x.g.box.y0 + x.g.box.y1) / 2],
              pockets: interleave ? plans.filter((pl) => pl.pi === pi) : [] };
   });
-  planSheetTabs(items, tool, sheet, warnings);
+  if (manualTabs) placeManualTabs(items, tool, tabCfg, manualTabs, warnings);
+  else planSheetTabs(items, tool, sheet, warnings);
+  // where the tabs are (centres on the bit's path), for the sheet view
+  const tabMarks = [];
+  for (const x of items) for (const [p, q] of x.tabs?.spans || []) {
+    const c = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+    if (!tabMarks.some((m) => Math.hypot(m.x - c[0], m.y - c[1]) < 0.05)) tabMarks.push({ x: +c[0].toFixed(4), y: +c[1].toFixed(4), a: Math.atan2(q[1] - p[1], q[0] - p[0]) });
+  }
+  const tabPaths = items.map((x) => x.loops[x.loops.length - 1]);
   // Shared cut lines: where two parts' outline paths run along the same line
   // (the parts sit exactly the bit apart), that stretch is one cut. Each is
   // recorded on both parts; in each pass whichever part is cut first cuts it.
@@ -2066,6 +2131,39 @@ export function sheetToolpaths(sheet, cfg) {
     if (!skip.length) pts.push(...outer);
     else for (const sp of skip) pts.push(sp.pts[0], sp.pts[1]);   // the leftover runs start and end at the shared stretches' ends
     return pts;
+  };
+  // Parts whose holes, dados and cutouts must all be done before a piece of
+  // outline: the order that travels least from pos, through each part's work,
+  // to where the piece starts (toEnd(pos) = that last distance). Every order is
+  // tried for up to 6 parts, nearest-next beyond that.
+  const workEntry = (x, pos, withPockets) => {
+    const d = [];
+    if (withPockets) for (const pl of x.pockets) d.push(pocketEntry(pl, pos));
+    for (const l of x.loops.slice(0, -1)) d.push(nearestVertex([l], pos));
+    return d.length ? Math.min(...d) : 0;
+  };
+  const workExit = (x, pos, withPockets) => {
+    let cur = pos;
+    if (withPockets && x.pockets.length) for (const pl of orderShortest(x.pockets, cur, pocketEntry, pocketExit, 30)) cur = pocketExit(pl, cur);
+    const holes = x.loops.slice(0, -1);
+    if (holes.length) cur = nearestOnLoop(holes[holes.length - 1], cur).p;
+    return cur;
+  };
+  const orderWork = (list, pos, withPockets, toEnd) => {
+    if (list.length < 2) return list;
+    const cost = (seq) => {
+      let d = 0, c = pos;
+      for (const x of seq) { d += workEntry(x, c, withPockets); c = workExit(x, c, withPockets); }
+      return d + toEnd(c);
+    };
+    if (list.length > 6) return orderShortest(list, pos, (x, p) => workEntry(x, p, withPockets), (x, p) => workExit(x, p, withPockets), 30);
+    let best = null, bestCost = Infinity;
+    const perm = (rest, seq) => {
+      if (!rest.length) { const c = cost(seq); if (c < bestCost - 1e-9) { bestCost = c; best = seq.slice(); } return; }
+      rest.forEach((x, i) => perm([...rest.slice(0, i), ...rest.slice(i + 1)], [...seq, x]));
+    };
+    perm(list, []);
+    return best;
   };
   // Shared cut lines, one pass: every part's outline is pieces still to cut;
   // the nearest piece is cut next, whichever part it belongs to, so the cut
@@ -2150,20 +2248,23 @@ export function sheetToolpaths(sheet, cfg) {
       }
       if (!best) break;
       const { x, pc } = best;
-      startPart(x);
       const S = st.get(x.pi);
       // perimeter last for the neighbour too: its holes, dados and cutouts
-      // before this piece cuts the line it shares with it
+      // before this piece cuts the line it shares with it. This part's and
+      // those neighbours' work is done in the order that travels least, ending
+      // where the piece starts.
       {
         const a = pc.closed ? 0 : pc.a, b = pc.closed ? S.P : pc.b;
+        const need = st.get(x.pi).started ? [] : [x];
         for (const sp of x.shared || []) {
           const o = items[sp.other];
-          if (st.get(o.pi).started) continue;
+          if (st.get(o.pi).started || need.includes(o)) continue;
           const iv = spansToIntervals(S.L, [sp.pts])[0];
           if (!iv) continue;
           const inside = (t) => (t >= a - 0.01 && t <= b + 0.01) || (t + S.P >= a - 0.01 && t + S.P <= b + 0.01);
-          if (inside(iv[0]) && inside(iv[1])) startPart(o);
+          if (inside(iv[0]) && inside(iv[1])) need.push(o);
         }
+        for (const o of orderWork(need, here(), withPockets, (pos) => (pc.closed ? nearestOnLoop(S.L, pos).d : dist(ptAt(S, firstFwd ? pc.a : pc.b), pos)))) startPart(o);
       }
       pb.op = 'profile';
       if (pc.closed) {
@@ -2251,5 +2352,5 @@ export function sheetToolpaths(sheet, cfg) {
     prev = m;
   }
   const mt = machineTime(pb.moves, cfg);
-  return { moves: pb.moves, warnings, stats: { sharedLength: sharedTotal, cutLength: cutLen, rapidLength: rapidLen, estMinutes: mt.total / 60, time: mt, minX, minY, maxX, maxY, minZ } };
+  return { moves: pb.moves, warnings, tabs: tabMarks, tabPaths, stats: { sharedLength: sharedTotal, cutLength: cutLen, rapidLength: rapidLen, estMinutes: mt.total / 60, time: mt, minX, minY, maxX, maxY, minZ } };
 }

@@ -1454,6 +1454,131 @@ for (const g of groupParts(parts)) {
   check(sh.partsMoved === 0 && sh.placements === sh.autoPlacements.placements, 'put back: the nest layout again');
 }
 
+// ---------- rule 6: holes and dados each done in one go, both before the part is cut out ----------
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const circ = (cx, cy, rr, n = 48) => Array.from({ length: n }, (_, k) => [cx + rr * Math.cos((-2 * Math.PI * k) / n), cy + rr * Math.sin((-2 * Math.PI * k) / n)]);
+  const dado = [[18.75, 0], [19.25, 0], [19.25, 5], [18.75, 5]];
+  const mk = (id) => ({ id, name: id, include: true, qty: 1, grain: 'none', thickness: 0.75, width: 20, height: 5,
+    outline: [[0, 0], [20, 0], [20, 5], [0, 5]], holes: [circ(10, 2.5, 0.375 / 2), circ(5, 2.5, 0.1969 / 2), circ(14, 2.5, 0.25 / 2)],
+    pockets: [{ loops: [dado], depth: 0.25, x0: 18.75, y0: 0, x1: 19.25, y1: 5 }], material: 'T', custom: false });
+  const sample = groupParts(normalizeAll(sampleKitchen()).parts.filter((p) => p.include));
+  let parts = 0, late = 0, split = 0;
+  for (const dadoToolId of ['same', 't-14down']) {
+    const s1 = { ...s0, dadoToolId };
+    const tl = resolveTools(s1, DEFAULT_LIBRARY, []);
+    const sheets = [{ sheet: nestParts([mk('A'), mk('B')], { ...s0.sheet, respectGrain: true }).sheets[0], t: 0.75 }];
+    for (const g of sample) for (const sheet of nestParts(g.parts, { ...s0.sheet, respectGrain: true }).sheets) sheets.push({ sheet, t: g.thickness });
+    for (const { sheet, t } of sheets) {
+      const r = opOrder(sheet, sheetToolpaths(sheet, { ...s1, ...tl, thickness: t }).moves, tl.tool.dia / 2 + 0.02);
+      parts += r.parts; late += r.late; split += r.split;
+    }
+  }
+  check(late === 0, `every part's holes and dados are done before it's cut out (${parts} parts, ${late} not)`);
+  check(split === 0, `each bit's holes are drilled in one go (${split} split)`);
+  // planted faults: a hole drilled after the part's outline, a dado move in the middle of the drilling
+  const tl = resolveTools({ ...s0, dadoToolId: 'same' }, DEFAULT_LIBRARY, []);
+  const sh1 = nestParts([mk('A'), mk('B')], { ...s0.sheet, respectGrain: true }).sheets[0];
+  const mv = sheetToolpaths(sh1, { ...s0, ...tl, thickness: 0.75 }).moves;
+  const di = mv.findIndex((m) => m.op === 'drill' && m.plunge);
+  const lateHole = [...mv.slice(0, di), ...mv.slice(di + 1), { ...mv[di] }];
+  const pk = mv.find((m) => m.op !== 'drill' && m.g === 1 && m.z < 0 && m.x != null);
+  const splitHoles = [...mv.slice(0, di + 1), { ...pk }, ...mv.slice(di + 1)];
+  const r1 = opOrder(sh1, lateHole, tl.tool.dia / 2 + 0.02), r2 = opOrder(sh1, splitHoles, tl.tool.dia / 2 + 0.02);
+  check(r1.late > 0 && r2.split > 0, `the order check catches a hole after the cutout (${r1.late}) and drilling split by a dado (${r2.split})`);
+}
+// late: a part with a hole or dado move after its first outline move; split: a
+// bit whose drilling is broken up by other work before it's finished
+function opOrder(sheet, moves, reach) {
+  let parts = 0, late = 0, split = 0;
+  for (const pl of sheet.placements) {
+    const g = placedGeometry(pl);
+    const inPart = (m) => m.x >= g.box.x0 - 1e-6 && m.x <= g.box.x1 + 1e-6 && m.y >= g.box.y0 - 1e-6 && m.y <= g.box.y1 + 1e-6;
+    const cutting = (m) => m.g === 1 && m.z < -1e-4 && inPart(m);
+    // the cut round it (a bit radius out; a shared line cut from the next part counts too)
+    const near = (m) => m.x >= g.box.x0 - reach && m.x <= g.box.x1 + reach && m.y >= g.box.y0 - reach && m.y <= g.box.y1 + reach;
+    const firstOutline = moves.findIndex((m) => (m.op === 'profile' || m.op === 'tab') && m.g === 1 && m.z < -1e-4 && near(m));
+    // holes and dado work (drilling, clearing, finishing passes, corner reliefs)
+    const lastWork = moves.reduce((k, m, i) => (m.op && !['profile', 'tab', 'screw', 'offcut'].includes(m.op) && cutting(m) ? i : k), -1);
+    if (lastWork < 0) continue;
+    parts++;
+    if (firstOutline >= 0 && lastWork > firstOutline) late++;
+  }
+  // each bit load: its drill moves in one unbroken run
+  let tool = null;
+  const runs = new Map();
+  moves.forEach((m, i) => {
+    if (m.toolchange) { tool = m; return; }
+    if (m.g !== 1 || m.z >= -1e-4) return;
+    const r = runs.get(tool) || { first: -1, last: -1, other: [] };
+    if (m.op === 'drill') { if (r.first < 0) r.first = i; r.last = i; } else r.other.push(i);
+    runs.set(tool, r);
+  });
+  for (const r of runs.values()) if (r.first >= 0 && r.other.some((i) => i > r.first && i < r.last)) split++;
+  return { parts, late, split };
+}
+
+// ---------- shared cut lines: neighbours' dados done in the order that travels least ----------
+{
+  // laid out like a real sheet (Carmel bathroom): two sides on the left, a long
+  // bottom and stretcher on the right, all sharing cut lines, every part with dados
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  s0.commonLine = true;
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const g = tl.tool.dia;
+  const rect = (w, h) => [[0, 0], [w, 0], [w, h], [0, h]];
+  const P = (id, w, h, pockets) => ({ id, name: id, include: true, qty: 1, grain: 'none', thickness: 0.75, width: w, height: h, outline: rect(w, h), holes: [], pockets, material: 'T', custom: false });
+  const pk = (x0, y0, x1, y1) => ({ loops: [[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]], depth: 0.25, x0, y0, x1, y1 });
+  const x2 = 1 + 23.125 + g;
+  const sheet = { w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], placements: [
+    { part: P('SIDE-R', 23.125, 21.5, [pk(22.4, 0, 23.125, 21.5), pk(0, 0.5, 23.125, 1.2)]), copy: 1, x: 1, y: 0.125, rotated: false },
+    { part: P('SIDE-L', 23.125, 21.5, [pk(0, 0, 0.725, 21.5), pk(0, 20.3, 23.125, 21.0)]), copy: 1, x: 1, y: 0.125 + 21.5 + g, rotated: false },
+    { part: P('STRETCHER-F', 61, 3.5, [pk(29.8, 0, 30.5, 3.5)]), copy: 1, x: x2, y: 0.125, rotated: false },
+    { part: P('BOTTOM', 61, 20, [pk(30.5, 0, 31.2, 20)]), copy: 1, x: x2, y: 0.125 + 3.5 + g, rotated: false },
+  ] };
+  const tp = sheetToolpaths(sheet, { ...s0, ...tl, thickness: 0.75, holdDown: 'tabs' });
+  let rap = 0, prev = null;
+  for (const m of tp.moves) { if (m.x == null) continue; if (prev && m.g === 0) rap += Math.hypot(m.x - prev.x, m.y - prev.y); prev = m; }
+  // in the order the neighbours happen to be listed this was 189" (SIDE-R > SIDE-L > STRETCHER-F > BOTTOM)
+  check(rap <= 160, `neighbours' dados before a shared line, least travel first (${rap.toFixed(0)}" of rapids, was 189")`);
+  check(opOrder(sheet, tp.moves, tl.tool.dia / 2 + 0.02).late === 0, 'and still every part\'s dados before its cutout');
+}
+
+// ---------- hand-placed tabs ----------
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const grp = groupParts(normalizeAll(sampleKitchen()).parts.filter((p) => p.include)).find((x) => x.key.startsWith('3/4 Baltic'));
+  const sh = nestParts(grp.parts, { ...s0.sheet, respectGrain: true }).sheets[0];
+  const cfgT = { ...s0, ...tl, thickness: grp.thickness, holdDown: 'tabs', tabs: { ...s0.tabs, maxArea: 0 } };
+  const auto = sheetToolpaths(sh, cfgT);
+  const tabLifts = (tp) => tp.moves.filter((m) => m.op === 'tab').length;
+  check(auto.tabs.length > 0 && auto.tabPaths.length === sh.placements.length, `the sheet reports its tabs (${auto.tabs.length}) and the bit's paths`);
+  // the automatic tabs placed by hand: the same tabs
+  const same = sheetToolpaths({ ...sh, tabsManual: auto.tabs.map((t) => ({ x: t.x, y: t.y })) }, cfgT);
+  check(same.tabs.length === auto.tabs.length && Math.abs(tabLifts(same) - tabLifts(auto)) <= 2, `the automatic tabs placed by hand cut the same (${same.tabs.length} tabs)`);
+  const res = simCheck(sh, carve(sh, same.moves, { res: 0.04, dia: tl.tool.dia }), { dia: tl.dadoTool.dia, profileDia: tl.tool.dia, thickness: grp.thickness, holdDown: 'tabs' });
+  check(res.ok, `hand-placed tabs: the sheet cuts clean (${res.uncut} uncut, ${res.deep} deep, ${res.notThrough} not through outside tabs)`);
+  // one tab clicked a little off the first part's edge: only that part has a tab, on its path
+  const b = placedGeometry(sh.placements[0]).box;
+  const one = sheetToolpaths({ ...sh, tabsManual: [{ x: (b.x0 + b.x1) / 2, y: b.y0 - 0.5 }] }, cfgT);
+  const path0 = one.tabPaths[0];
+  const onPath = one.tabs.length === 1 && path0.some((q, i) => distSeg([one.tabs[0].x, one.tabs[0].y], q, path0[(i + 1) % path0.length]) < 1e-3);
+  check(onPath && tabLifts(one) > 0 && tabLifts(one) < tabLifts(auto), `one tab clicked near an edge goes on that part's path (${one.tabs.length} tab, ${tabLifts(one)} tab moves)`);
+  // hand-placed tabs are cut even when the job holds parts with onion skin
+  const skin = sheetToolpaths({ ...sh, tabsManual: [{ x: (b.x0 + b.x1) / 2, y: b.y0 }] }, { ...cfgT, holdDown: 'skin' });
+  check(tabLifts(skin) > 0, 'hand-placed tabs are cut with onion skin too');
+  const far = sheetToolpaths({ ...sh, tabsManual: [{ x: -20, y: -20 }] }, cfgT);
+  check(far.tabs.length === 0 && far.warnings.some((w) => /hand-placed tab/.test(w)), 'a tab nowhere near a part: not cut, and it says so');
+  const none = sheetToolpaths({ ...sh, tabsManual: [] }, cfgT);
+  check(tabLifts(none) === 0, 'Remove all: no tabs on the sheet');
+}
+function distSeg(p, a, b) {
+  const vx = b[0] - a[0], vy = b[1] - a[1], L2 = vx * vx + vy * vy;
+  const t = L2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / L2)) : 0;
+  return Math.hypot(a[0] + t * vx - p[0], a[1] + t * vy - p[1]);
+}
+
 // ---------- run simulator: the posted file read back and timed ----------
 {
   const s0 = structuredClone(DEFAULT_SETTINGS);

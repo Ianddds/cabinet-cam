@@ -53,9 +53,13 @@ toolpath / nesting code. Every rule here is a mistake that already happened once
 5. **Drilling first, and each bit is loaded once per sheet** with everything it
    does (its holes first). Manual bit changes cost far more than a few inches of
    rapid travel.
-6. **Order per part: holes, then dados / rabbets, then cutouts, then the
-   perimeter.** No pocket floor may be left with bumps or ridges: `npm test`
-   samples every floor the bit can reach and fails on any spot left uncut.
+6. **Holes and dados / rabbets before the part is cut out.** Either can come
+   first, but each is done completely in one operation before the next starts
+   (a bit's holes aren't split up by other work), and both are finished before
+   the part's cutout (`npm test` checks every sample sheet, with one bit and
+   with two, and plants a hole after a cutout to make sure it's caught). No
+   pocket floor may be left with bumps or ridges: `npm test` samples every
+   floor the bit can reach and fails on any spot left uncut.
 7. **Shared cut lines:** a line two parts share is cut once; before it's cut,
    both parts have had their holes, dados and cutouts done (perimeter last for
    every part). Never trade a sheet for shared edge or run-out room.

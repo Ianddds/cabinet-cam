@@ -2,7 +2,7 @@ import { DEFAULT_SETTINGS, groupParts, mergeSettings, holdDownOf, usesSkin, uses
 import { carve, check, shade } from './lib/sim.js';
 import { nestParts, applySolution, nestKey, placedGeometry, partExits, rectMinus, compareKeep } from './lib/nest.js';
 import { placeShapes, isShapePart, labelPoint, SHAPE_ORDERS } from './lib/shapes.js';
-import { sheetToolpaths, screwR, rectsOutline, screwCheck, offcutCutLines } from './lib/toolpath.js';
+import { sheetToolpaths, screwR, rectsOutline, screwCheck, offcutCutLines, tabOnPaths } from './lib/toolpath.js';
 import { post, postWithWarnings, fileExtension, SBP_MAX_TOOL, toolNumberOk } from './lib/post.js';
 import { parsePP } from './lib/vpp.js';
 import { DEFAULT_LIBRARY, TOOL_FIELDS, newTool, resolveTools } from './lib/tools.js';
@@ -29,7 +29,8 @@ let job = { id: null, name: '', source: null, parts: [], settings: loadSavedSett
 let results = []; // [{ group, sheets: [{ sheet, tp, file, text }] , unplaced }]
 let activeSheet = 0;
 let moveEdit = false;   // sheet view: drag parts by hand (they snap to the nearest spot that fits)
-let screwEdit = false;  // sheet view: click to add a hold-down screw, drag to move, right-click to remove
+let screwEdit = false;
+let tabEdit = false;    // sheet view: click to add a tab, drag to move, right-click to remove  // sheet view: click to add a hold-down screw, drag to move, right-click to remove
 let library = structuredClone(DEFAULT_LIBRARY);
 let remnants = []; // shared inventory from the server
 
@@ -659,6 +660,7 @@ function runNest() {
     const sheets = nest.sheets.map((sheet, i) => {
       applyMoves(sheet, job.manualMoves?.[mkey]?.[i], { gap: cfg.commonLine ? cfg.tool.dia : cfg.sheet.spacing, remnantMin: nestOpts.remnantMin, edits: job.layoutEdits?.[mkey]?.[i], partOf: (k) => g.parts.find((p) => partKey(p) === k) });
       applyManualScrews(sheet, job.manualScrews?.[mkey]?.[i]);
+      sheet.tabsManual = job.manualTabs?.[mkey]?.[i] || undefined;
       const tp = sheetToolpaths(sheet, cfg);
       const rno = sheet.remnant && (remnants.find((r) => r.id === sheet.remnant.id)?.no ?? nestOpts.remnants.find((r) => r.id === sheet.remnant.id)?.no ?? kept?.stock?.find((r) => r.id === sheet.remnant.id)?.no);
       sheet.remnant && (sheet.remnant.no = rno);
@@ -869,7 +871,7 @@ function renderSheet(item) {
   const pad = 1.5;
   const H = s.sheetH;
   const fy = (y) => H - y; // machine Y up
-  let svg = `<svg class="sheet-svg${screwEdit ? ' screw-edit' : ''}${moveEdit ? ' move-edit' : ''}" viewBox="${-pad} ${-pad} ${s.sheetW + 2 * pad} ${H + 2 * pad}" xmlns="http://www.w3.org/2000/svg">`;
+  let svg = `<svg class="sheet-svg${screwEdit ? ' screw-edit' : ''}${moveEdit ? ' move-edit' : ''}${tabEdit ? ' tab-edit' : ''}" viewBox="${-pad} ${-pad} ${s.sheetW + 2 * pad} ${H + 2 * pad}" xmlns="http://www.w3.org/2000/svg">`;
   svg += `<rect class="sheet" x="0" y="0" width="${s.sheetW}" height="${H}"/>`;
   svg += `<rect class="trim" x="${tx}" y="${s.trim}" width="${s.sheetW - 2 * tx}" height="${H - 2 * s.trim}"/>`;
   // an L / T remnant: the missing part of its bounding box
@@ -919,6 +921,13 @@ function renderSheet(item) {
       svg += `<circle class="drillpt" cx="${m.x.toFixed(3)}" cy="${fy(m.y).toFixed(3)}" r="0.22"/>`;
     }
   }
+  // tabs: where the bit lifts to leave a bridge (hand-placed ones can be dragged in Place tabs)
+  if (item.tp.tabs?.length && ($('#showPaths').checked || tabEdit)) {
+    const tl = item.cfg.tabs?.length || 0.5, tw = Math.max(0.3, item.cfg.tool.dia * 1.6);
+    item.tp.tabs.forEach((t, k) => {
+      svg += `<g class="tabmark" data-k="${k}" transform="translate(${t.x.toFixed(3)} ${fy(t.y).toFixed(3)}) rotate(${(-t.a * 180 / Math.PI).toFixed(2)})"><rect x="${-tl / 2}" y="${-tw / 2}" width="${tl}" height="${tw}"><title>Tab${sh.tabsManual ? ' (placed by hand)' : ''}${tabEdit ? ' · drag to move, right-click to remove' : ''}</title></rect>${tabEdit ? '<circle class="tabhit" r="1"/>' : ''}</g>`;
+    });
+  }
   // screw hold-downs: the hole, and the ring no cut comes inside (red = bad spot)
   if (screwsShown(item.cfg, sh) || screwEdit) (sh.screws || []).forEach((q, k) => {
     const c = item.screwChk?.[k];
@@ -951,6 +960,7 @@ function renderSheet(item) {
       <span class="spacer"></span>
       <span class="legend"><span><i style="background:var(--path)"></i>cut</span><span><i style="background:var(--rapid)"></i>rapid</span><span><i style="background:var(--pocket)"></i>dado</span><span><i style="background:var(--drill)"></i>drill</span>${usesTabs(item.cfg) ? '<span><i style="background:var(--tab)"></i>tab</span>' : ''}</span>
       <button id="moveEditBtn" class="${moveEdit ? 'active' : ''}" ${job.cut || results.pendingShapes ? 'disabled' : ''} title="${job.cut ? 'The job is marked as cut: its layout is fixed' : 'Drag parts by hand on this sheet. A part dropped too close to another part, a screw or the edge goes to the nearest spot where it fits.'}">${moveEdit ? 'Done moving' : 'Move parts'}</button>
+      <button id="tabEditBtn" class="${tabEdit ? 'active' : ''}" title="Place tabs by hand on this sheet: click near a part's edge to add one, drag to move, right-click to remove">${tabEdit ? 'Done placing tabs' : 'Place tabs'}</button>
       <button id="screwEditBtn" class="${screwEdit ? 'active' : ''}" title="Place hold-down screws by hand on this sheet: click to add, drag to move, right-click to remove">${screwEdit ? 'Done placing screws' : 'Place screws'}</button>
       <button id="runSimBtn" ${results.pendingShapes ? 'disabled' : ''} title="Play this sheet's file in 3D the way the machine will run it">Run simulation</button>
       <button id="printSheet">Print layout</button>
@@ -959,6 +969,7 @@ function renderSheet(item) {
     </div>${svg}
     ${simNote}
     ${moveEdit ? `<p class="small screw-help">Moving parts: drag a part where you want it. If it would come too close to another part's cut, a hold-down screw or the edge of the stock, it goes to the nearest spot where it fits (dashed outline while dragging). Right-click a part to copy, delete or put it back; right-click a spot to paste. ${sh.partsMoved || 0} moved${sh.partsAdded ? `, ${sh.partsAdded} pasted` : ''}${sh.partsRemoved ? `, ${sh.partsRemoved} deleted` : ''} on this sheet. <button id="moveReset" ${sh.partsMoved ? '' : 'disabled'}>Put all back</button>${moveMsg ? `<br><span class="${moveMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(moveMsg.replace(/^!/, ''))}</span>` : ''}${job.pendingQty && Object.keys(job.pendingQty).length ? '<br><strong>Parts added or deleted: Nest &amp; toolpath nests again with the new counts.</strong> Until then deleted parts leave their spot empty and pasted ones stay where you put them.' : ''}</p>` : ''}
+    ${tabEdit ? `<p class="small screw-help">Placing tabs: click near a part's edge to add a tab there (it goes on the bit's path, along that edge, clear of the corners; on a line two parts share it holds both), drag one to move it, right-click to remove it. ${item.tp.tabs?.length || 0} on this sheet${sh.tabsManual ? ' (placed by hand: parts without one get none)' : ''}. <button id="tabAuto" ${sh.tabsManual ? '' : 'disabled'}>Back to automatic</button> <button id="tabClear" ${item.tp.tabs?.length ? '' : 'disabled'}>Remove all</button>${tabMsg ? `<br><span class="${tabMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(tabMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
     ${screwEdit ? `<p class="small screw-help">Placing screws: click an empty spot to add one, drag to move, right-click to remove. A screw dropped too close to a cut goes to the nearest spot clear of it. Red = a cut or part is too close. ${sh.screws?.length || 0} on this sheet${sh.screwsManual ? ' (placed by hand)' : ''}. <button id="screwAuto" ${sh.screwsManual ? '' : 'disabled'}>Back to automatic</button> <button id="screwClear" ${sh.screws?.length ? '' : 'disabled'}>Remove all</button>${screwMsg ? `<br><span class="${screwMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(screwMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
     ${sh.remnant ? `<p class="small"><strong>Remnant R${sh.remnant.no ?? '?'}</strong> (${fraction(sh.w)} × ${fraction(sh.h)}): put its zero corner (the one that was the sheet's zero corner) at the origin, grain along X.</p>` : ''}
     <p class="muted small">Origin (red dot) is front-left of the ${sh.remnant ? 'remnant' : 'sheet'}, X along the ${s.sheetW}" side. Z0 = ${item.cfg.zZero === 'table' ? 'spoilboard' : 'material top'}. Air-cut new posts before running material.</p>`;
@@ -977,8 +988,14 @@ function renderSheet(item) {
       showMessages([{ error: true, text: `Couldn't simulate: ${e.message}` }]);
     } finally { btn.disabled = false; }
   };
-  $('#screwEditBtn').onclick = () => { screwEdit = !screwEdit; if (screwEdit) moveEdit = false; renderResults(); };
-  $('#moveEditBtn').onclick = () => { moveEdit = !moveEdit; if (moveEdit) screwEdit = false; renderResults(); };
+  $('#screwEditBtn').onclick = () => { screwEdit = !screwEdit; if (screwEdit) { moveEdit = false; tabEdit = false; } renderResults(); };
+  $('#tabEditBtn').onclick = () => { tabEdit = !tabEdit; if (tabEdit) { moveEdit = false; screwEdit = false; } tabMsg = ''; renderResults(); };
+  if (tabEdit) {
+    $('#tabAuto').onclick = () => { tabMsg = ''; setSheetTabs(item, null); };
+    $('#tabClear').onclick = () => { tabMsg = ''; setSheetTabs(item, []); };
+    wireTabEdit(item, $('#sheetView svg'), fy);
+  }
+  $('#moveEditBtn').onclick = () => { moveEdit = !moveEdit; if (moveEdit) { screwEdit = false; tabEdit = false; } renderResults(); };
   if (moveEdit && !job.cut && !results.pendingShapes) {
     $('#moveReset').onclick = () => setSheetMoves(item, null);
     wireMoveEdit(item, $('#sheetView svg'), fy);
@@ -989,6 +1006,76 @@ function renderSheet(item) {
     wireScrewEdit(item, $('#sheetView svg'), fy);
   }
   renderLabels();
+}
+
+// ---------- hand-placed tabs ----------
+// Kept like screws: job.manualTabs[nest key | layout][sheet index] = [{ x, y }]
+// (tab centres on the bit's path). A new layout starts from automatic again.
+function setSheetTabs(item, list) {
+  job.manualTabs = job.manualTabs || {};
+  const m = (job.manualTabs[item.mkey] = job.manualTabs[item.mkey] || {});
+  if (list) m[item.idx] = list.map((q) => ({ x: +q.x.toFixed(4), y: +q.y.toFixed(4) }));
+  else delete m[item.idx];
+  if (!Object.keys(m).length) delete job.manualTabs[item.mkey];
+  item.sheet.tabsManual = list ? m[item.idx] : undefined;
+  item.tp = sheetToolpaths(item.sheet, item.cfg);
+  item.screwChk = screwsShown(item.cfg, item.sheet) ? screwCheck(item.sheet, item.tp.moves, item.cfg) : [];
+  item.text = null;
+  item.sim = null;
+  renderResults();
+}
+function wireTabEdit(item, svgEl, fy) {
+  const at = (e) => {
+    const pt = svgEl.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const p = pt.matrixTransform(svgEl.getScreenCTM().inverse());
+    return { x: p.x, y: fy(p.y) };
+  };
+  const opt = item.cfg.tabs || {};
+  const okOpt = opt.length > 0 && opt.thickness > 0;
+  const snap = (p) => tabOnPaths(item.tp.tabPaths || [], [p.x, p.y], item.cfg.tool, opt);
+  const list = () => (item.tp.tabs || []).map((t) => ({ x: t.x, y: t.y }));
+  let drag = null;
+  svgEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const g = e.target.closest('g.tabmark');
+    if (!g) return;
+    const l = list();
+    l.splice(+g.dataset.k, 1);
+    tabMsg = '';
+    setSheetTabs(item, l);
+  });
+  svgEl.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    if (!okOpt) { tabMsg = '!Set a tab length and thickness on the Cutting card first.'; renderResults(); return; }
+    const g = e.target.closest('g.tabmark');
+    if (g) { drag = { k: +g.dataset.k, g, l: list(), moved: false }; svgEl.setPointerCapture(e.pointerId); return; }
+    const h = snap(at(e));
+    if (!h) { tabMsg = '!Click within an inch of a part\'s edge to put a tab there.'; renderResults(); return; }
+    if (h.short) { tabMsg = '!That edge is too short for a tab.'; renderResults(); return; }
+    tabMsg = h.on.length > 1 ? 'On a shared line: the tab holds both parts.' : '';
+    setSheetTabs(item, [...list(), { x: h.c[0], y: h.c[1] }]);
+  });
+  svgEl.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const h = snap(at(e));
+    if (!h || h.short) return;
+    drag.l[drag.k] = { x: h.c[0], y: h.c[1] };
+    drag.moved = true;
+    const tr = drag.g.getAttribute('transform').replace(/translate\([^)]*\)/, `translate(${h.c[0].toFixed(3)} ${fy(h.c[1]).toFixed(3)})`);
+    // the angle of the edge it's on now
+    const a = Math.atan2(h.on[0].span[1][1] - h.on[0].span[0][1], h.on[0].span[1][0] - h.on[0].span[0][0]);
+    drag.g.setAttribute('transform', tr.replace(/rotate\([^)]*\)/, `rotate(${(-a * 180 / Math.PI).toFixed(2)})`));
+  });
+  const end = () => {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    if (d.moved) { tabMsg = ''; setSheetTabs(item, d.l); }
+  };
+  svgEl.addEventListener('pointerup', end);
+  svgEl.addEventListener('pointercancel', end);
 }
 
 // ---------- moving parts by hand ----------
@@ -1024,6 +1111,7 @@ function refreshSheet(item) {
 let partClip = null;   // { pl, group } copied in Move parts
 let moveMsg = '';      // the last copy / paste / delete note, shown under the sheet
 let screwMsg = '';     // where a screw went, when it snapped
+let tabMsg = '';       // the last tab note
 const pendingOf = (p) => job.pendingQty?.[partKey(p)]?.delta || 0;
 const effQty = (p) => Math.max(0, (p.qty || 0) + pendingOf(p));
 function sheetEdits(item) {
