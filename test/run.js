@@ -6,7 +6,7 @@ import './clipper-node.js';
 import { sampleKitchen, rawPart, sampleCabinetPlaces } from './synthetic.js';
 import { cabinetModel, drawerBoxes, constructionHTML } from '../public/lib/construction.js';
 import { inRegion, difference, offset, union, area, intersect } from '../public/lib/clip.js';
-import { placeShapes, isShapePart } from '../public/lib/shapes.js';
+import { SHAPE_ORDERS, placeShapes, isShapePart } from '../public/lib/shapes.js';
 import { normalizeAll } from '../lib/parts.js';
 import { decode } from '../lib/onshape.js';
 import { nestParts, placedGeometry, applySolution, nestKey } from '../public/lib/nest.js';
@@ -1092,6 +1092,18 @@ for (const g of groupParts(parts)) {
   }
   check(n === 18 && close === 0, `curved shapes at 45° (turned over too): ${n} placed, ${flipped} turned over, ${close} too close`);
   check(ms < 30000, `curved shapes fit in reasonable time (${(ms / 1000).toFixed(1)} s)`);
+  // the orders shared out over several workers (as the app does on more cores)
+  // give the same layout as one worker trying them all
+  const o90 = { sheetW: 96, sheetH: 48, trim: 0.5, spacing: 0.45, respectGrain: true, shapeStep: 90, shapeFlip: true };
+  const whole = placeShapes({ sheets: [], unplaced: [] }, parts, o90);
+  const sig = (r) => JSON.stringify(r.sheets.map((sh) => sh.placements.map((pl) => [pl.label, pl.angle, pl.mirror ? 1 : 0, +pl.x.toFixed(4), +pl.y.toFixed(4)])));
+  for (const n of [2, 3, 8]) {
+    const answers = Array.from({ length: n }, (_, w) => placeShapes({ sheets: [], unplaced: [] }, parts, { ...o90, passes: Array.from({ length: SHAPE_ORDERS }, (_, k) => k).filter((k) => k % n === w) }).spots);
+    const better = (a, b) => { for (let i = 0; i < a.length; i++) { if (a[i] < b[i] - 1e-6) return true; if (a[i] > b[i] + 1e-6) return false; } return false; };
+    const win = answers.reduce((b, a) => (!b || better(a.cost, b.cost) || (!better(b.cost, a.cost) && a.pass < b.pass) ? a : b), null);
+    const rebuilt = placeShapes({ sheets: [], unplaced: [] }, parts, o90, win);
+    check(sig(rebuilt) === sig(whole), `custom shapes split over ${n} workers: same layout as one`);
+  }
 }
 
 // --- merging identical parts: a half turn still merges, a mirror image never does ---

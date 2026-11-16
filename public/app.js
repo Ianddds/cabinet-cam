@@ -1,7 +1,7 @@
 import { DEFAULT_SETTINGS, groupParts, mergeSettings, holdDownOf, usesSkin, usesTabs } from './lib/settings.js';
 import { carve, check, shade } from './lib/sim.js';
-import { nestParts, applySolution, nestKey, placedGeometry, partExits, rectMinus } from './lib/nest.js';
-import { placeShapes, isShapePart, labelPoint } from './lib/shapes.js';
+import { nestParts, applySolution, nestKey, placedGeometry, partExits, rectMinus, compareKeep } from './lib/nest.js';
+import { placeShapes, isShapePart, labelPoint, SHAPE_ORDERS } from './lib/shapes.js';
 import { sheetToolpaths, screwR, rectsOutline, screwCheck } from './lib/toolpath.js';
 import { post, postWithWarnings, fileExtension, SBP_MAX_TOOL, toolNumberOk } from './lib/post.js';
 import { parsePP } from './lib/vpp.js';
@@ -90,6 +90,12 @@ function showMessages(list) {
   $('#messages').innerHTML = list.filter((m) => m.items?.length || m.text).map((m) =>
     `<div class="msg ${m.error ? 'error' : ''}">${esc(m.text || '')}${m.items?.length ? `<ul>${m.items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : ''}</div>`).join('');
 }
+
+// the desktop app's extras (electron/preload.cjs), and its per-PC choices
+const desk = window.desktop || null;
+const DESK_KEY = 'cabinetcam.desktop';
+function deskPrefs() { try { return JSON.parse(localStorage.getItem(DESK_KEY) || '{}') || {}; } catch { return {}; } }
+function setDeskPrefs(patch) { try { localStorage.setItem(DESK_KEY, JSON.stringify({ ...deskPrefs(), ...patch })); } catch { /* not kept */ } }
 
 let lastRaw = null;
 function setParts(data) {
@@ -468,7 +474,7 @@ function nestGroups() {
 // and the sheets are laid out again from that, which is quick.
 const shapeMemo = new Map();      // layout key -> { spots } | { error }
 const shapePending = new Set();   // layout keys being fitted now
-let shapeWorker = null, shapeJob = 0;
+let shapeJob = 0;
 function shapesFor(nest, g, nestOpts) {
   const shapes = g.parts.filter((p) => p.include && p.qty > 0 && isShapePart(p, nestOpts));
   if (!shapes.length) return { nest, pending: 0 };
@@ -484,31 +490,50 @@ function shapesFor(nest, g, nestOpts) {
     // what the worker needs: the sheets as they are, and the shapes
     const slimNest = { unplaced: [], sheets: nest.sheets.map((s) => ({ w: s.w, h: s.h, trim: s.trim, trimX: s.trimX, remnant: s.remnant ? { rects: s.remnant.rects } : null, screws: s.screws || [], offcuts: [], placements: s.placements.map((pl) => ({ x: pl.x, y: pl.y, rotated: pl.rotated, part: { width: pl.part.width, height: pl.part.height } })) })) };
     const slimShapes = shapes.map((p) => ({ id: p.id, name: p.name, width: p.width, height: p.height, qty: p.qty, include: true, grain: p.grain, custom: true, shape: true, outline: p.outline, pockets: p.pockets.map(() => 0) }));
-    shapeWorker ??= new Worker(new URL('./lib/shape-worker.js', import.meta.url), { type: 'module' });
+    // the part orders tried are shared out over the cores; the best wins (ties to the
+    // lower order), so it's the same layout one worker trying them all would find
+    const n = Math.max(1, Math.min(SHAPE_ORDERS, CORES));
+    const shares = Array.from({ length: n }, (_, w) => Array.from({ length: SHAPE_ORDERS }, (_, k) => k).filter((k) => k % n === w));
     const id = ++shapeJob;
-    const done = (e) => {
-      if (e.data?.id !== id) return;
-      if (e.data.progress) {
-        // show how far it's got in the note
-        const { pass, passes, part, parts } = e.data.progress;
-        const m = [...document.querySelectorAll('#messages .msg')].find((x) => /Fitting \d+ custom shape/.test(x.textContent));
-        if (m) m.textContent = m.textContent.replace(/ \(try [^)]*\)|$/, ` (try ${pass} of ${passes}, part ${part} of ${parts})`).replace(/\) \(try/, ') (try');
-        return;
-      }
-      shapeWorker.removeEventListener('message', done);
-      shapePending.delete(key);
-      shapeMemo.set(key, e.data.error ? { error: e.data.error } : { spots: e.data.spots });
-      if (shapeMemo.size > 40) shapeMemo.delete(shapeMemo.keys().next().value);
-      if (results.length) runNest();   // lay the sheets out again, now with the shapes
-    };
-    shapeWorker.addEventListener('message', done);
-    shapeWorker.postMessage({ id, nest: slimNest, parts: slimShapes, opts: nestOpts });
+    const doneTries = shares.map(() => 0);
+    const answers = [];
+    const workers = shares.map((passes, w) => {
+      const wk = new Worker(new URL('./lib/shape-worker.js', import.meta.url), { type: 'module' });
+      wk.onmessage = (e) => {
+        if (e.data?.id !== id) return;
+        if (e.data.progress) {
+          doneTries[w] = e.data.progress.pass - 1;
+          const m = [...document.querySelectorAll('#messages .msg')].find((x) => /Fitting \d+ custom shape/.test(x.textContent));
+          const tries = doneTries.reduce((a, v) => a + v, 0);
+          if (m) m.textContent = m.textContent.replace(/ \((try|tries)[^)]*\)|$/, ` (tries done: ${tries} of ${SHAPE_ORDERS}, ${n} at once)`).replace(/\) \((try|tries)/, ') ($1');
+          return;
+        }
+        wk.terminate();
+        answers[w] = e.data;
+        doneTries[w] = passes.length;
+        if (answers.filter(Boolean).length < n) return;
+        shapePending.delete(key);
+        const err = answers.find((a) => a.error);
+        const good = answers.filter((a) => a.spots);
+        const better = (a, b) => { for (let i = 0; i < a.length; i++) { if (a[i] < b[i] - 1e-6) return true; if (a[i] > b[i] + 1e-6) return false; } return false; };
+        const win = good.reduce((b, a) => (!b || better(a.spots.cost, b.spots.cost) || (!better(b.spots.cost, a.spots.cost) && a.spots.pass < b.spots.pass) ? a : b), null);
+        shapeMemo.set(key, win ? { spots: win.spots } : { error: err?.error || 'no answer' });
+        if (shapeMemo.size > 40) shapeMemo.delete(shapeMemo.keys().next().value);
+        if (results.length) runNest();   // lay the sheets out again, now with the shapes
+      };
+      wk.onerror = (e) => { wk.onmessage({ data: { id, error: e.message || 'shape worker failed' } }); };
+      return { wk, passes };
+    });
+    for (const { wk, passes } of workers) wk.postMessage({ id, nest: slimNest, parts: slimShapes, opts: { ...nestOpts, passes } });
   }
   return { nest, pending: shapes.reduce((a, p) => a + p.qty, 0) };
 }
 
 // what a worker needs of a part
 const slimPart = (p) => ({ id: p.id, name: p.name, width: p.width, height: p.height, qty: p.qty, include: p.include, grain: p.grain, exits: partExits(p), shape: isShapePart(p, { shapeStep: job.settings.shapeStep ?? 15 }) });
+
+// cores to search on (one is left for the page)
+const CORES = Math.max(1, Math.min(16, (navigator.hardwareConcurrency || 2) - 1));
 
 function searchGroup({ g, nestOpts }, seed, onProgress) {
   return new Promise((resolve, reject) => {
@@ -545,7 +570,14 @@ async function searchNests(force = false) {
     $('#nestBtn').textContent = `Nesting… ${Math.round((Date.now() - t0) / 1000)}s` + (sheets.length ? ` · ${sheets.reduce((a, v) => a + v, 0)} full sheets` : '');
   };
   const timer = setInterval(status, 500);
-  searching = Promise.all(todo.map((x) => searchGroup(x, force ? (Date.now() & 0xffff) + 1 : 12345, (p) => { best[x.key] = p.sheets; })
+  // every core: each material gets its share of searches side by side (different
+  // seeds), and the best of them is kept; one core is left for the page
+  const perGroup = Math.max(1, Math.floor(CORES / todo.length));
+  const base = force ? (Date.now() & 0xffff) + 1 : 12345;
+  const searchAll = (x) => Promise.all(Array.from({ length: perGroup }, (_, i) =>
+    searchGroup(x, base + i * 7919, (p) => { best[x.key] = Math.min(best[x.key] ?? Infinity, p.sheets); })))
+    .then((rs) => rs.reduce((b, r) => (!b || (r.stats?.keep && b.stats?.keep && compareKeep(r.stats.keep, b.stats.keep) < 0) ? r : b), null));
+  searching = Promise.all(todo.map((x) => searchAll(x)
     .then((r) => {
       const fresh = applySolution(x.g.parts, x.nestOpts, r.solution);
       const prev = job.nests[x.key];
@@ -697,6 +729,7 @@ function renderResults() {
   renderCutState();
   // custom shapes still being fitted: nothing to download or mark cut yet
   $('#downloadAll').disabled = !!results.pendingShapes;
+  $('#saveAllFolder').disabled = !!results.pendingShapes;
   $('#markCut').disabled = !!results.pendingShapes && !job.cut;
   $('#sheetTabs').innerHTML = all.map((x, i) => {
     const n = results.find((r) => r.sheets.includes(x));
@@ -732,6 +765,38 @@ function simulateSheet(item) {
   item.sim = { url: c.toDataURL(), result, res, W: sim.W, H: sim.H };
   return item.sim;
 }
+// ---------- G-code folder (desktop app) ----------
+// Files go straight into a folder chosen once on this PC (the ShopBot PC's
+// share, a USB stick...). In a browser they download as before.
+const outFolder = () => deskPrefs().outputFolder || '';
+async function chooseOutFolder() {
+  const f = await desk.chooseFolder(outFolder());
+  if (f) setDeskPrefs({ outputFolder: f });
+  showOutFolder();
+  return f;
+}
+function showOutFolder() {
+  const el = $('#outFolder');
+  $('#saveAllFolder').hidden = !desk;
+  el.hidden = !desk;
+  if (!desk) return;
+  const f = outFolder();
+  el.innerHTML = f ? `→ <span title="${esc(f)}">${esc(f.length > 38 ? '…' + f.slice(-37) : f)}</span> <a href="#" id="outChange">change</a> · <a href="#" id="outOpen">open</a>`
+    : '<a href="#" id="outChange">choose G-code folder</a>';
+  $('#outChange').onclick = (e) => { e.preventDefault(); chooseOutFolder(); };
+  if (f) $('#outOpen').onclick = (e) => { e.preventDefault(); desk.openFolder(f); };
+}
+async function saveToFolder(items) {
+  const folder = outFolder() || await chooseOutFolder();
+  if (!folder) return;
+  const r = await desk.writeFiles(folder, items.map((x) => ({ name: x.file, text: textFor(x) })));
+  if (!r.ok) { showMessages([{ error: true, text: `Couldn't save to ${folder}: ${r.error}` }]); return; }
+  const rep = r.replaced.length ? ` (${r.replaced.length} replaced an older file of the same name)` : '';
+  showMessages([{ text: `Saved ${r.written.length === 1 ? r.written[0] : r.written.length + ' files'} to ${folder}${rep}.` }]);
+}
+showOutFolder();
+$('#saveAllFolder').onclick = () => saveToFolder(results.flatMap((r) => r.sheets));
+
 $('#downloadAll').onclick = async () => {
   for (const x of results.flatMap((r) => r.sheets)) {
     download(x.file, textFor(x));
@@ -845,13 +910,15 @@ function renderSheet(item) {
       <span class="legend"><span><i style="background:var(--path)"></i>cut</span><span><i style="background:var(--rapid)"></i>rapid</span><span><i style="background:var(--pocket)"></i>dado</span><span><i style="background:var(--drill)"></i>drill</span>${usesTabs(item.cfg) ? '<span><i style="background:var(--tab)"></i>tab</span>' : ''}</span>
       <button id="screwEditBtn" class="${screwEdit ? 'active' : ''}" title="Place hold-down screws by hand on this sheet: click to add, drag to move, right-click to remove">${screwEdit ? 'Done placing screws' : 'Place screws'}</button>
       <button id="printSheet">Print layout</button>
-      <button id="dlSheet" class="primary" ${results.pendingShapes ? 'disabled title="Custom shapes are still being fitted"' : ''}>Download ${esc(item.file)}</button>
+      ${desk ? `<button id="saveSheet" class="primary" ${results.pendingShapes ? 'disabled' : ''} title="Write this sheet's file into the G-code folder">Save to folder</button>` : ''}
+      <button id="dlSheet" class="${desk ? '' : 'primary'}" ${results.pendingShapes ? 'disabled title="Custom shapes are still being fitted"' : ''}>Download ${esc(item.file)}</button>
     </div>${svg}
     ${simNote}
     ${screwEdit ? `<p class="small screw-help">Placing screws: click an empty spot to add one, drag to move, right-click to remove. Red = a cut or part is too close. ${sh.screws?.length || 0} on this sheet${sh.screwsManual ? ' (placed by hand)' : ''}. <button id="screwAuto" ${sh.screwsManual ? '' : 'disabled'}>Back to automatic</button> <button id="screwClear" ${sh.screws?.length ? '' : 'disabled'}>Remove all</button></p>` : ''}
     ${sh.remnant ? `<p class="small"><strong>Remnant R${sh.remnant.no ?? '?'}</strong> (${fraction(sh.w)} × ${fraction(sh.h)}): put its zero corner (the one that was the sheet's zero corner) at the origin, grain along X.</p>` : ''}
     <p class="muted small">Origin (red dot) is front-left of the ${sh.remnant ? 'remnant' : 'sheet'}, X along the ${s.sheetW}" side. Z0 = ${item.cfg.zZero === 'table' ? 'spoilboard' : 'material top'}. Air-cut new posts before running material.</p>`;
   $('#dlSheet').onclick = () => download(item.file, textFor(item));
+  if (desk) $('#saveSheet').onclick = () => saveToFolder([item]);
   $('#printSheet').onclick = () => printLayouts([item]);
   $('#screwEditBtn').onclick = () => { screwEdit = !screwEdit; renderResults(); };
   if (screwEdit) {
@@ -987,12 +1054,101 @@ function fitPreview() {
     : +v;
   doc.body.style.zoom = String(Math.max(0.2, Math.min(z, 2)));
 }
-function printPreview(html, { title = 'Print preview', orient = 'landscape', margin = 0.4 } = {}) {
+// Desktop app: the preview is a real PDF made by the app (true page breaks),
+// with Save PDF, a paper size and a printer remembered per kind of printout.
+// In a browser it's the pages drawn on screen and the browser's print dialog.
+let pp = null;   // { html, title, orient, margin, kind, id, url }
+
+async function renderPdf() {
+  const cur = pp;
+  if (!cur) return;
+  $('#ppPages').textContent = 'making PDF…';
+  if (cur.id) { desk.closePdf(cur.id); cur.id = null; }
+  cur.doc?.destroy();
+  cur.doc = null;
+  try {
+    const r = await desk.makePdf(cur.html, { paper: $('#ppPaper').value, orient: cur.orient, margin: cur.margin });
+    if (pp !== cur) { desk.closePdf(r.id); return; }   // closed or replaced meanwhile
+    cur.id = r.id;
+    cur.pdf = r.pdf;
+    await drawPdf(cur);
+    $('#ppPages').textContent = `${r.pages} page${r.pages === 1 ? '' : 's'} · ${$('#ppPaper').value} ${cur.orient}`;
+  } catch (e) {
+    $('#ppPages').textContent = `couldn't make the PDF: ${e?.message || e}`;
+  }
+}
+
+// pdf.js (public/lib/vendor/pdfjs) draws the PDF's pages: what's shown is the
+// file that prints / saves, page breaks and all
+let pdfjsLib = null;
+async function pdfLib() {
+  if (!pdfjsLib) {
+    pdfjsLib = await import('./lib/vendor/pdfjs/pdf.min.mjs');
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('./lib/vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
+  }
+  return pdfjsLib;
+}
+async function drawPdf(cur) {
+  const lib = await pdfLib();
+  if (!cur.doc) cur.doc = await lib.getDocument({ data: cur.pdf.slice() }).promise;
+  if (pp !== cur) return;
+  const box = $('#ppDoc');
+  const first = (await cur.doc.getPage(1)).getViewport({ scale: 1 });   // points
+  const v = $('#ppZoom').value;
+  const fitW = (box.clientWidth - 60) / first.width;
+  const fitP = Math.min(fitW, (box.clientHeight - 40) / first.height);
+  const scale = Math.max(0.2, v === 'fit' ? fitW : v === 'page' ? fitP : (+v * 96) / 72);
+  const dpr = window.devicePixelRatio || 1;
+  const canvases = [];
+  for (let i = 1; i <= cur.doc.numPages; i++) {
+    const page = await cur.doc.getPage(i);
+    const vp = page.getViewport({ scale: scale * dpr });
+    const c = document.createElement('canvas');
+    c.width = Math.round(vp.width);
+    c.height = Math.round(vp.height);
+    c.style.width = `${Math.round(vp.width / dpr)}px`;
+    c.style.height = `${Math.round(vp.height / dpr)}px`;
+    await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+    if (pp !== cur) return;
+    canvases.push(c);
+  }
+  const top = box.scrollTop;
+  box.replaceChildren(...canvases);
+  box.scrollTop = top;
+}
+
+async function fillPrinters(kind) {
+  const sel = $('#ppPrinter');
+  const want = deskPrefs().printers?.[kind] || '';
+  let list = [];
+  try { list = await desk.printers(); } catch { /* none listed */ }
+  sel.innerHTML = `<option value="">Ask each time (Windows print dialog)</option>` +
+    list.map((p) => `<option value="${esc(p.name)}">${esc(p.label)}${p.isDefault ? ' (default)' : ''}</option>`).join('');
+  sel.value = list.some((p) => p.name === want) ? want : '';
+}
+
+function printPreview(html, { title = 'Print preview', orient = 'landscape', margin = 0.4, kind = 'layouts' } = {}) {
+  if (pp?.id) desk?.closePdf(pp.id);
+  pp?.doc?.destroy();
+  pp = { html, title, orient, margin, kind };
   ppOrient = orient;
   const frame = $('#ppFrame');
   $('#ppTitle').textContent = title;
   $('#ppPages').textContent = '';
+  for (const el of document.querySelectorAll('#printPreview .pp-desk')) el.hidden = !desk;
+  frame.hidden = !!desk;
+  $('#ppDoc').hidden = !desk;
+  $('#ppDoc').replaceChildren();
   $('#printPreview').hidden = false;
+  if (desk) {
+    $('#ppPaper').value = deskPrefs().paper?.[kind] || 'Letter';
+    $('#ppPrint').textContent = 'Print';
+    fillPrinters(kind);
+    frame.onload = null;
+    renderPdf();
+    return;
+  }
+  frame.removeAttribute('src');
   frame.onload = () => {
     const doc = frame.contentDocument;
     const st = doc.createElement('style');
@@ -1004,11 +1160,43 @@ function printPreview(html, { title = 'Print preview', orient = 'landscape', mar
   };
   frame.srcdoc = html;
 }
-const closePreview = () => { $('#printPreview').hidden = true; $('#ppFrame').srcdoc = ''; };
+const closePreview = () => {
+  if (pp?.id) desk?.closePdf(pp.id);
+  pp?.doc?.destroy();
+  pp = null;
+  $('#ppDoc').replaceChildren();
+  $('#printPreview').hidden = true;
+  $('#ppFrame').removeAttribute('src');
+  $('#ppFrame').srcdoc = '';
+};
 $('#ppClose').onclick = closePreview;
-$('#ppPrint').onclick = () => { const w = $('#ppFrame').contentWindow; w.focus(); w.print(); };
-$('#ppZoom').onchange = fitPreview;
-window.addEventListener('resize', () => { if (!$('#printPreview').hidden) fitPreview(); });
+$('#ppPrint').onclick = async () => {
+  if (!desk) { const w = $('#ppFrame').contentWindow; w.focus(); w.print(); return; }
+  if (!pp?.id) return;
+  const btn = $('#ppPrint');
+  btn.disabled = true;
+  const printer = $('#ppPrinter').value;
+  const r = await desk.printPdf(pp.id, { deviceName: printer, copies: +$('#ppCopies').value || 1 });
+  btn.disabled = false;
+  if (r.ok) $('#ppPages').textContent = printer ? `sent to ${$('#ppPrinter').selectedOptions[0].textContent}` : $('#ppPages').textContent;
+  else if (r.error && !/cancel/i.test(r.error)) showMessages([{ error: true, text: `Printing failed: ${r.error}` }]);
+};
+$('#ppSave').onclick = async () => {
+  if (!pp?.pdf) return;
+  const name = `${(job.name || 'Job').replace(/[^\w -]+/g, '_').slice(0, 60)} - ${pp.title.replace(/\s*\(.*\)$/, '')}.pdf`;
+  const r = await desk.savePdf(pp.pdf, name);
+  if (r.saved) $('#ppPages').textContent = `saved ${r.path}`;
+};
+$('#ppPaper').onchange = () => {
+  if (!pp) return;
+  setDeskPrefs({ paper: { ...deskPrefs().paper, [pp.kind]: $('#ppPaper').value } });
+  renderPdf();
+};
+$('#ppPrinter').onchange = () => { if (pp) setDeskPrefs({ printers: { ...deskPrefs().printers, [pp.kind]: $('#ppPrinter').value } }); };
+const rezoom = () => { if ($('#printPreview').hidden) return; if (desk) { if (pp?.doc) drawPdf(pp); } else fitPreview(); };
+$('#ppZoom').onchange = rezoom;
+let rezoomTimer = 0;
+window.addEventListener('resize', () => { clearTimeout(rezoomTimer); rezoomTimer = setTimeout(rezoom, 150); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#printPreview').hidden) closePreview(); });
 
 function printLayouts(items) {
@@ -1041,7 +1229,7 @@ $('#constructionBtn').onclick = () => {
   const cabinets = new Set(job.places.map((p) => p.cabinet).filter((c) => c && !off.has(c)));
   const html = constructionHTML(job.places, { job: job.name || 'Job', where, cabinets });
   if (!html) { showMessages([{ error: true, text: 'No cabinet parts to draw (only parts tagged with a cabinet are drawn).' }]); return; }
-  printPreview(html, { title: `Construction sheets (${job.name || 'Job'})` });
+  printPreview(html, { title: `Construction sheets (${job.name || 'Job'})`, kind: 'construction' });
 };
 
 $('#labelsBtn').onclick = () => { $('#labelsPanel').hidden = !$('#labelsPanel').hidden; renderLabels(); };
@@ -1172,7 +1360,7 @@ $('#cutListPrint').onclick = () => {
     th{font-size:11px;text-transform:uppercase;color:#555}td.num{text-align:right;font-variant-numeric:tabular-nums}
     tr.group td{background:#eee;font-weight:600}.muted{color:#777}.small{font-size:11px}</style></head><body>
     <section class="page"><h1>Cut list — ${esc(job.name || '')}</h1><p>${new Date().toLocaleDateString()} · parts not cut on the CNC</p>
-    ${cutListHtml(cutListRows(runParts().filter((p) => p.qty > 0)))}</section></body></html>`, { title: 'Cut list', orient: 'portrait', margin: 0.5 });
+    ${cutListHtml(cutListRows(runParts().filter((p) => p.qty > 0)))}</section></body></html>`, { title: 'Cut list', orient: 'portrait', margin: 0.5, kind: 'cutlist' });
 };
 $('#saveRaw').onclick = () => {
   const name = (job.name || 'onshape').replace(/[^\w-]+/g, '_').slice(0, 40);

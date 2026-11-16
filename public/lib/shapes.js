@@ -24,6 +24,8 @@ const SCALE = 1e4;          // Clipper works in integers: 0.0001"
 const FIT_POINTS = 24;
 const FIT_TOL_MIN = 0.004, FIT_TOL_MAX = 0.05;   // inch
 const SHUFFLES = 5;        // extra fixed shuffles of the order tried, besides the sorted ones
+/** How many part orders a full fit tries (opts.passes picks some of them, for splitting the work across workers). */
+export const SHAPE_ORDERS = 3 + SHUFFLES;
 const SLACK = 0.002;        // obstacles grow this much more than the spacing (rounding)
 
 const L = () => {
@@ -485,8 +487,11 @@ export function placeShapes(nest, parts, opts, spots = null) {
       orders.push(o);
     }
     const better = (a, b) => { for (let i = 0; i < a.length; i++) { if (a[i] < b[i] - 1e-6) return true; if (a[i] > b[i] + 1e-6) return false; } return false; };
-    passCount = orders.length;
-    for (const o of orders) { const r = pass(o); if (!best || better(r.cost, best.cost)) best = r; }
+    // opts.passes: only these orders (a worker doing its share); the page keeps the best
+    // of all workers, ties going to the lower order, as one worker trying them all would
+    const which = Array.isArray(opts.passes) ? opts.passes.filter((k) => k >= 0 && k < orders.length) : orders.map((_, k) => k);
+    passCount = which.length;
+    for (const k of which) { const r = pass(orders[k]); r.passIndex = k; if (!best || better(r.cost, best.cost)) best = r; }
   }
   const { sheets, states, unplaced, used } = best;
 
@@ -507,7 +512,7 @@ export function placeShapes(nest, parts, opts, spots = null) {
     sh.offcut = sh.offcuts[0] || null;
     sh.yield = sh.placements.reduce((a, pl) => a + (pl.shape ? areaOf(pl.part.outline) : pl.part.width * pl.part.height), 0) / (sh.w * sh.h);
   }
-  return { ...nest, sheets, fullSheets: sheets.filter((x) => !x.remnant).length, unplaced, shapes: items.length, spots: { order: best.order, at: used } };
+  return { ...nest, sheets, fullSheets: sheets.filter((x) => !x.remnant).length, unplaced, shapes: items.length, spots: { order: best.order, at: used, cost: best.cost, pass: best.passIndex ?? 0 } };
 }
 
 // small fixed-seed generator (same layout every time for the same job)

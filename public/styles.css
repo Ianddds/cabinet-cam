@@ -192,3 +192,6 @@ td select.overridden { border-color: var(--accent); color: var(--accent); }
 .pp-bar select { margin-left: 4px; }
 #ppFrame { flex: 1; width: 100%; border: 0; background: #5f6368; }
 .pp-bar label { display: flex; align-items: center; gap: 4px; margin: 0; }
+.out-folder a { margin: 0 2px; }
+.pp-doc { flex: 1; overflow: auto; padding: 20px 0; background: #5f6368; }
+.pp-doc canvas { display: block; margin: 0 auto 20px; background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,.45); }

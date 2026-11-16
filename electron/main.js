@@ -6,6 +6,7 @@ import { app, BrowserWindow, Menu, dialog, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { registerDesktop } from './desktop.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
@@ -33,7 +34,8 @@ function createWindow() {
     title: 'Cabinet CAM',
     icon: path.join(here, '..', 'build', 'icon.png'),
     autoHideMenuBar: false,
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
+    // preload: the few desktop things the page may ask for (desktop.js); plugins: the PDF viewer for print preview
+    webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(here, 'preload.cjs'), plugins: true },
   });
   win.loadURL(baseUrl);
   // links to other sites (Onshape, the dev portal) open in the normal browser;
@@ -135,6 +137,7 @@ app.whenReady().then(async () => {
     return;
   }
   buildMenu();
+  registerDesktop(() => win);
   createWindow();
   setTimeout(() => checkForUpdates(false), 8000);
   app.on('activate', () => { if (!win) createWindow(); });

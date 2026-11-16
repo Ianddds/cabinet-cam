@@ -91,6 +91,8 @@ const cmp = (a, b) => {
   for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 1e-9) return a[i] - b[i];
   return 0;
 };
+/** Compare two searches' results (stats.keep): below 0 when a is the better nest. */
+export const compareKeep = cmp;
 
 // Which orientations a part may take on a sheet with grain along X.
 function orientations(part, respectGrain) {
@@ -521,7 +523,7 @@ export function nestParts(parts, opts) {
   }
 
   const solution = { order: keep.order.map((it) => it.key), rule: keep.rule, mode: keep.mode };
-  return { ...finish(keep.res, opts), solution, stats: { ms: Date.now() - t0, tries, lowerBound: lowerBound(items, ctx), shared: keep.res.shared, screwsMissing: keep.res.screwsMissing || 0 } };
+  return { ...finish(keep.res, opts), solution, stats: { ms: Date.now() - t0, tries, lowerBound: lowerBound(items, ctx), shared: keep.res.shared, screwsMissing: keep.res.screwsMissing || 0, keep: keep.res.keep } };
 }
 
 // Rebuild a stored nest exactly. Returns null if the parts no longer match it.

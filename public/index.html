@@ -221,6 +221,8 @@
           <label class="check inline"><input type="checkbox" id="showPaths" checked /> Toolpaths</label>
           <label class="check inline" title="Carve the toolpath into the sheet and check it against the model: every floor cut to depth, nothing deeper than the model, outlines cut through (with tabs). Yellow = left uncut, red = too deep, pink = not cut through."><input type="checkbox" id="showSim" /> Simulate cut</label>
           <button id="downloadAll">Download all</button>
+          <button id="saveAllFolder" class="primary" hidden title="Write every sheet's file straight into the G-code folder">Save all to folder</button>
+          <span id="outFolder" class="small out-folder" hidden></span>
         </div>
         <div id="sheetTabs" class="tabs"></div>
         <div id="labelsPanel" class="labels-panel" hidden>
@@ -261,11 +263,16 @@
       <strong id="ppTitle">Print preview</strong>
       <span id="ppPages" class="muted small"></span>
       <span class="spacer"></span>
-      <label class="small">Zoom <select id="ppZoom"><option value="fit">Fit width</option><option value="page">Whole page</option><option value="0.5">50%</option><option value="0.75">75%</option><option value="1">100%</option></select></label>
+      <label class="small pp-desk" hidden>Paper <select id="ppPaper"><option>Letter</option><option>Legal</option><option>Tabloid</option><option>A4</option><option>A3</option></select></label>
+      <label class="small pp-desk" hidden>Printer <select id="ppPrinter"></select></label>
+      <label class="small pp-desk" hidden>Copies <input type="number" id="ppCopies" min="1" max="50" value="1" style="width:4em" /></label>
+      <button id="ppSave" class="pp-desk" hidden>Save PDF…</button>
+      <label class="small" id="ppZoomWrap">Zoom <select id="ppZoom"><option value="fit">Fit width</option><option value="page">Whole page</option><option value="0.5">50%</option><option value="0.75">75%</option><option value="1">100%</option></select></label>
       <button id="ppPrint" class="primary">Print…</button>
       <button id="ppClose">Close</button>
     </div>
     <iframe id="ppFrame" title="Print preview"></iframe>
+    <div id="ppDoc" class="pp-doc" hidden></div>
   </div>
   <dialog id="keysDlg">
     <form method="dialog" class="keys-form">

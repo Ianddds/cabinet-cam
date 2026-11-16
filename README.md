@@ -14,6 +14,7 @@ Cabinet CAM can be installed like any Windows program: `Cabinet-CAM-Setup-x.y.z.
 - **Updates**: the app checks the GitHub releases it was built from a few seconds after it starts (and from **Help → Check for updates…**), downloads a newer one and offers to restart. That needs the repository to be public; with a private one, download the new Setup file from the Releases page and run it over the old install.
 - **Building the installer** is done by GitHub (`.github/workflows/build.yml`): repository → **Actions** → **Build installer** → **Run workflow**, type the new version number (higher than the last, e.g. `0.2.0`). It runs the tests, builds the installer on Windows and publishes it under **Releases**. Windows shows an "unknown publisher" warning the first time (the installer isn't code-signed): **More info → Run anyway**.
 - `.gitignore` keeps `.env`, `data/` and `node_modules/` out of the repository: keys and shop data never go to GitHub.
+- **G-code folder** (desktop app): **Save all to folder** on the Sheets card, and **Save to folder** on each sheet, write the files straight into a folder chosen once on this PC (the ShopBot PC's share, a USB stick…); **change** / **open** next to it. A file with the same name is replaced and the message says so. **Download** still works as before.
 - Run it un-installed for a try: `npm install`, then `npm run app`. `npm start` (browser, as before) is unchanged. If port 3100 is taken the app uses another free port.
 
 ## Installing on a Windows PC (from a folder)
@@ -121,6 +122,8 @@ Order on each sheet: holes → dados/rabbets → inside cutouts → outlines (pe
 
 **Nest & toolpath** searches for the best layout in the background (one worker per material, side by side) for up to **Nest search (sec)** (Sheet card, default 6; it stops early when nothing better turns up). It tries every combination of part order (longest side, area, perimeter, width, height, short side), placement rule (best short side, best long side, best area, bottom-left, contact point) and sheet filling (first sheet it fits / best fit over all sheets), then keeps making small changes to the best order. Best means **fewest sheets**, then the **biggest rectangular offcut on the last sheet** — shown dashed with its size on the last sheet of each material.
 
+**All the cores.** Each material gets its share of the computer's cores (one is left for the window): that many searches run side by side from different starting points and the best is kept, so more cores search more in the same time. Custom-shape fitting shares its part orders out over the cores the same way; ties go to the order one worker would have kept, so the shape layout is the same on any PC.
+
 The winning layout is kept with the job (`nests`), so reopening a saved job, or changing settings that only affect toolpaths, gives exactly the same layout. If parts, quantities, grain, sheet size, trim or spacing change, a quick nest is shown until you click **Nest & toolpath** again. **Search again** tries from a different starting point and only replaces a layout with a better one. The summary shows the area minimum (total part area ÷ sheet) when the nest uses more sheets than that; grain locks usually account for the gap.
 
 ### Custom shapes
@@ -163,6 +166,13 @@ Settings: label width × height (default 2 × 1 in; other sizes scale), printer 
 ## Printed sheet layouts
 
 **Print layouts** (Sheets card) prints every sheet on an ordinary printer, one landscape page per sheet; **Print layout** next to a sheet's download prints just that one. Each page has the sheet drawn in black and white with each part's **#number** (matching the labels), name and size, dados shaded, offcuts to keep dashed (with their R number once the job is marked cut), the zero corner and grain direction, then a parts list (#, part, cabinet, size, grain, dados/cutouts). Paper size comes from the print dialog (Letter, Legal, A4…).
+
+### Print preview
+
+Every printout (Print layouts, Print layout, Construction sheets, Cut list → Print) opens a preview first.
+
+- **Desktop app:** the preview is the actual PDF that will print (drawn with pdf.js, `public/lib/vendor/pdfjs`), so page breaks are exactly as printed. **Paper** (Letter, Legal, Tabloid, A4, A3) and **Printer** are remembered on this PC for each kind of printout: pick the shop printer once for construction sheets and **Print** sends them straight there. "Ask each time" shows the Windows print dialog. **Save PDF…** writes the PDF where you choose. **Copies** and **Zoom** as you'd expect.
+- **Browser:** the pages drawn on screen, then the browser's own print dialog.
 
 ## Construction sheets
 
