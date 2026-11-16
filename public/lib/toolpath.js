@@ -1879,22 +1879,71 @@ export function sheetToolpaths(sheet, cfg) {
         P.op = 'pocket';
         const items = [];
         L.legPlans.forEach((lp, li) => lp.forEach((group, rank) => group.forEach((sg) => items.push({ sg, li, rank }))));
-        while (items.length) {
-          const here = pickPos();
-          const minRank = new Map();
-          for (const it of items) minRank.set(it.li, Math.min(minRank.get(it.li) ?? Infinity, it.rank));
-          const down = !first && P.z < 0 && P.z <= L.z + 1e-9 && dist(here, posNow()) < 1e-9;
-          let best = null;
-          items.forEach((it, k) => {
-            if (it.rank !== minRank.get(it.li)) return;
-            it.sg.forEach((e, ei) => {
-              const d = dist(e, here);
-              const score = (down && stayDown(here, e) ? 0 : 1e6) + d;
-              if (!best || score < best.score) best = { score, k, ei };
+        // A leg's rows in places apart from each other (a groove's ends, where
+        // it runs into a rabbet at each end of a drawer side) are kept in order
+        // within each place, not across them: otherwise every rank goes to one
+        // end and back to the other.
+        {
+          const segD = (s1, s2) => Math.min(distToSeg(s1[0], s2[0], s2[1]), distToSeg(s1[1], s2[0], s2[1]), distToSeg(s2[0], s1[0], s1[1]), distToSeg(s2[1], s1[0], s1[1]));
+          const near = 2.5 * ((cfg.dadoTool || cfg.tool).dia);
+          for (const li of new Set(items.map((it) => it.li))) {
+            const mine = items.filter((it) => it.li === li);
+            const parent = mine.map((_, i) => i);
+            const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+            for (let i = 0; i < mine.length; i++) for (let j = i + 1; j < mine.length; j++) if (find(i) !== find(j) && segD(mine[i].sg, mine[j].sg) < near) parent[find(i)] = find(j);
+            mine.forEach((it, i) => { it.li = `${li}.${find(i)}`; });
+          }
+        }
+        // The rows' order. Nearest-next alone can strand a far leg (a drawer side:
+        // one end's rabbet, across to the other, back for the groove, across
+        // again), so whole orders are compared too: leg by leg in every order of
+        // the legs (each leg's rows still farthest-from-the-walls first), ending
+        // near where the finishing starts. Lifting counts extra.
+        const LIFT = 2;   // inches of travel a lift-and-plunge is worth
+        const finStarts = L.chains.flatMap((c) => (c.closed ? c.pts : [c.pts[0], c.pts[c.pts.length - 1]]));
+        const toFinish = (p) => (finStarts.length ? Math.min(...finStarts.map((q) => dist(p, q))) : 0);
+        const legsOf = [...new Set(items.map((it) => it.li))];
+        const greedySeq = (start, legOrder) => {
+          const left = items.slice();
+          const seq = [];
+          let here = start, cost = 0, first = true;
+          while (left.length) {
+            const minRank = new Map();
+            for (const it of left) minRank.set(it.li, Math.min(minRank.get(it.li) ?? Infinity, it.rank));
+            // leg by leg: only the first unfinished leg in legOrder
+            const legNow = legOrder ? legOrder.find((li) => minRank.has(li)) : null;
+            let best = null;
+            left.forEach((it, k) => {
+              if (it.rank !== minRank.get(it.li) || (legNow != null && it.li !== legNow)) return;
+              it.sg.forEach((e, ei) => {
+                const d = dist(e, here);
+                const sc = d + (first || d > 0.5 ? LIFT : 0);
+                if (!best || sc < best.sc) best = { sc, k, ei };
+              });
             });
-          });
-          const { sg } = items.splice(best.k, 1)[0];
-          const [a, b] = best.ei === 0 ? sg : [sg[1], sg[0]];
+            const it = left.splice(best.k, 1)[0];
+            const [a, b] = best.ei === 0 ? it.sg : [it.sg[1], it.sg[0]];
+            seq.push([a, b]);
+            cost += best.sc + dist(a, b);
+            here = b;
+            first = false;
+          }
+          return { seq, cost: cost + toFinish(here) };
+        };
+        const start0 = pickPos();
+        let plan = null;
+        const consider = (r) => { if (!plan || r.cost < plan.cost - 1e-6) plan = r; };
+        if (legsOf.length > 1 && legsOf.length <= 5) {
+          const perm = (rest, acc) => {
+            if (!rest.length) { consider(greedySeq(start0, acc)); return; }
+            rest.forEach((li, i) => perm([...rest.slice(0, i), ...rest.slice(i + 1)], [...acc, li]));
+          };
+          perm(legsOf, []);
+        }
+        // nearest-next as it was: kept when it's no worse
+        const greedy = greedySeq(start0, null);
+        if (!plan || greedy.cost <= plan.cost + 1e-6) plan = greedy;
+        for (const [a, b] of plan.seq) {
           P.op = 'pocket';
           goTo(a[0], a[1], [b]);
           P.op = 'pocket';

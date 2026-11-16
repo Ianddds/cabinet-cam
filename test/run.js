@@ -1579,6 +1579,28 @@ function distSeg(p, a, b) {
   return Math.hypot(a[0] + t * vx - p[0], a[1] + t * vy - p[1]);
 }
 
+// ---------- a drawer side's pocket: one end's rabbet, the groove, the other end, without crossing back and forth ----------
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const lib = DEFAULT_LIBRARY.map((t) => (t.id === 't-5mm' ? { ...t, stepover: 0.744, stepdown: 0.13 } : t));
+  s0.toolId = 't-5mm'; s0.dadoToolId = 'same'; s0.holdDown = 'tabs';
+  const tl = resolveTools(s0, lib, []);
+  const L = 20.956, H = 4.531, rb = 0.43;
+  const rect = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  const loops = union([rect(0, 0, rb, H), rect(L - rb, 0, L, H), rect(0, 3.532, L, 4.019)], [], 'nonzero');
+  const part = { id: 'DS', name: 'DRAWER_SIDE', include: true, qty: 1, grain: 'none', thickness: 0.472, width: L, height: H, outline: rect(0, 0, L, H), holes: [],
+    pockets: [{ loops, depth: 0.26, x0: 0, y0: 0, x1: L, y1: H }], material: 'T', custom: false };
+  const sheet = { w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], placements: [{ part, copy: 1, x: 2, y: 2, rotated: false }] };
+  const tp = sheetToolpaths(sheet, { ...s0, ...tl, thickness: 0.472 });
+  const firstProfile = tp.moves.findIndex((m) => m.op === 'profile');
+  let hop = 0, long = 0, prev = null;
+  tp.moves.slice(0, firstProfile).forEach((m) => { if (m.x == null) return; if (prev && m.g === 0) { const d = Math.hypot(m.x - prev.x, m.y - prev.y); hop += d; if (d > 5) long++; } prev = m; });
+  // nearest-next alone crossed the side four times (93" of travel)
+  check(hop < 45 && long <= 1, `drawer side pocket: ${hop.toFixed(0)}" of travel, ${long} trip(s) the length of the side (was 93", 4)`);
+  const res = simCheck(sheet, carve(sheet, tp.moves, { res: 0.02, dia: tl.tool.dia }), { dia: tl.tool.dia, profileDia: tl.tool.dia, thickness: 0.472, holdDown: 'tabs' });
+  check(res.ok, `drawer side pocket cuts clean (${res.uncut} uncut, ${res.deep} deep)`);
+}
+
 // ---------- run simulator: the posted file read back and timed ----------
 {
   const s0 = structuredClone(DEFAULT_SETTINGS);
