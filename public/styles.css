@@ -203,3 +203,10 @@ td select.overridden { border-color: var(--accent); color: var(--accent); }
 .sheet-svg g.pl.moved .part { stroke-dasharray: 0.6 0.3; }
 .sheet-svg g.pl.bad .part { fill: rgba(220, 40, 40, 0.35); }
 .sheet-svg .ghost { fill: rgba(30, 160, 90, 0.18); stroke: #1a9c5a; stroke-width: 0.12; stroke-dasharray: 0.5 0.3; pointer-events: none; }
+
+/* parts table: material groups fold up */
+tr.group[data-g] { cursor: pointer; user-select: none; }
+tr.group[data-g]:hover td { filter: brightness(0.97); }
+tr.group .caret { display: inline-block; width: 1em; }
+.parts-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.parts-foot .spacer { flex: 1; }

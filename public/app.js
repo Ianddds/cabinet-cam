@@ -212,7 +212,9 @@ function renderParts() {
   let rows = '';
   for (const g of groups) {
     const count = g.parts.filter((p) => p.include).reduce((a, p) => a + (forRun(p).qty || 0), 0);
-    rows += `<tr class="group"><td colspan="10">${esc(g.key)} — ${count} pcs</td></tr>`;
+    const open = groupOpen(g);
+    rows += `<tr class="group${open ? '' : ' shut'}" data-g="${esc(g.key)}" title="Click to ${open ? 'collapse' : 'expand'}"><td colspan="10"><span class="caret">${open ? '▾' : '▸'}</span> ${esc(g.key)} — ${count} pcs${open ? '' : ` <span class="muted small">(${g.parts.length} line${g.parts.length === 1 ? '' : 's'} hidden)</span>`}</td></tr>`;
+    if (!open) continue;
     for (const p of g.parts) {
       const i = job.parts.indexOf(p);
       const runQty = forRun(p).qty;
@@ -237,8 +239,24 @@ function renderParts() {
   const total = runParts().filter((p) => p.include).reduce((a, p) => a + (p.qty || 0), 0);
   $('#partsSummary').textContent = `${job.parts.length} unique · ${total} pcs · ${groups.length} material group${groups.length === 1 ? '' : 's'}`;
   $('#nestBtn').disabled = total === 0;
+  $('#groupsToggle').hidden = groups.length < 2;
+  $('#groupsToggle').textContent = groups.every(groupOpen) ? 'Collapse all' : 'Expand all';
   renderCutList();
 }
+
+// Material groups in the parts table fold up: click a group's row. Unassigned
+// material starts folded (it's usually stray bodies); the rest start open.
+// Remembered while the app is open.
+const groupState = new Map();
+function groupOpen(g) {
+  return groupState.get(g.key) ?? !/^unassigned\b/i.test(g.material || g.key);
+}
+$('#groupsToggle').onclick = () => {
+  const groups = groupParts(job.parts);
+  const open = !groups.every(groupOpen);
+  for (const g of groups) groupState.set(g.key, open);
+  renderParts();
+};
 
 function cutListHtml(rows) {
   let html = '', mat = null;
@@ -275,6 +293,12 @@ $('#partsTable').addEventListener('change', (e) => {
   if (results.length) runNest();
 });
 $('#partsTable').addEventListener('click', (e) => {
+  const gr = e.target.closest('tr.group[data-g]');
+  if (gr) {
+    const g = groupParts(job.parts).find((x) => x.key === gr.dataset.g);
+    if (g) { groupState.set(g.key, !groupOpen(g)); renderParts(); }
+    return;
+  }
   if (!e.target.hasAttribute('data-split')) return;
   const i = +e.target.closest('tr[data-i]').dataset.i;
   job.parts.splice(i, 1, ...splitPart(job.parts[i]));
@@ -768,6 +792,15 @@ function simulateSheet(item) {
   item.sim = { url: c.toDataURL(), result, res, W: sim.W, H: sim.H };
   return item.sim;
 }
+// the Nest & toolpath button again under the parts list: same button, kept in step
+$('#nestBtnBottom').onclick = () => $('#nestBtn').click();
+{
+  const top = $('#nestBtn'), bottom = $('#nestBtnBottom');
+  const sync = () => { bottom.disabled = top.disabled; bottom.textContent = top.textContent; };
+  new MutationObserver(sync).observe(top, { attributes: true, childList: true, characterData: true, subtree: true });
+  sync();
+}
+
 // ---------- G-code folder (desktop app) ----------
 // Files go straight into a folder chosen once on this PC (the ShopBot PC's
 // share, a USB stick...). In a browser they download as before.
