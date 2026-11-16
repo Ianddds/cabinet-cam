@@ -1467,6 +1467,38 @@ function circlePoly(cx, cy, r, n) {
   return out;
 }
 
+// A hole that runs down past a pocket's floor (a Blum Tandem hook hole at the
+// back of a drawer side, drilled where the back dado's wall is) leaves a round
+// bite in the floor face. The pocket is cut as if its floor ran straight through
+// the hole (the hole is drilled deeper anyway), so its wall stays straight
+// instead of the cutter going round the hole. Only the part of the hole the
+// floor wraps round is filled: no wider than the hole, never past the wall.
+function hull(pts) {
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lower = [], upper = [];
+  for (const q of p) { while (lower.length >= 2 && cr(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop(); lower.push(q); }
+  for (const q of p.reverse()) { while (upper.length >= 2 && cr(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop(); upper.push(q); }
+  return lower.slice(0, -1).concat(upper.slice(0, -1));
+}
+export function fillHoleBites(pocket, circles) {
+  let loops = pocket.loops;
+  for (const c of circles) {
+    if (c.depth < pocket.depth - 1e-3) continue;            // shallower: the pocket cuts it away
+    const r = c.d / 2;
+    if (c.cx + r < pocket.x0 - 0.01 || c.cx - r > pocket.x1 + 0.01 || c.cy + r < pocket.y0 - 0.01 || c.cy - r > pocket.y1 + 0.01) continue;
+    const disc = [circlePoly(c.cx, c.cy, r + 0.003, 48)];
+    // the floor just round the hole, made convex: its straight walls carried
+    // across the bite
+    const near = intersect(loops, [circlePoly(c.cx, c.cy, r + 0.25, 64)]);
+    if (!near.length) continue;
+    const fill = difference(intersect([hull(near.flat())], disc), loops);
+    if (area(fill) < 1e-5) continue;
+    loops = union(loops, fill);
+  }
+  return loops === pocket.loops ? pocket : { ...pocket, loops: loops.map((l, i) => (i === 0 ? ensureCCW(l) : l)) };
+}
+
 export function sheetToolpaths(sheet, cfg) {
   const warnings = [];
   const pb = new PathBuilder(cfg.safeZ);
@@ -1501,21 +1533,26 @@ export function sheetToolpaths(sheet, cfg) {
   const fullDepth = T + (cfg.overcut || 0);
   for (const x of geo) {
     const pockets = [], holes = [];
+    const round = [];   // small round holes, drilled or not (see fillHoleBites)
     for (const p of x.g.pockets) {
       const c = p.loops.length === 1 && asCircle(p.loops[0]);
       const t = c && matchTool(c.d);
-      if (t) drillOps.push({ x: c.cx, y: c.cy, center: [c.cx, c.cy], depth: p.depth, tool: t, label: x.label, pi: geo.indexOf(x) });
+      if (c && (t || c.d < dado.dia - 1e-3)) round.push({ cx: c.cx, cy: c.cy, d: c.d, depth: p.depth });
+      if (t) drillOps.push({ x: c.cx, y: c.cy, center: [c.cx, c.cy], d: c.d, depth: p.depth, tool: t, label: x.label, pi: geo.indexOf(x) });
       else if (c && c.d < dado.dia - 1e-3) warnings.push(`${x.label}: ${c.d.toFixed(3)}" hole has no matching drill — skipped`);
       else pockets.push(p); // bigger round holes (hinge cups) are milled as pockets
     }
     for (const h of x.g.holes) {
       const c = asCircle(h);
       const t = c && matchTool(c.d);
-      if (t) drillOps.push({ x: c.cx, y: c.cy, center: [c.cx, c.cy], depth: fullDepth, tool: t, label: x.label, through: true, pi: geo.indexOf(x) });
+      if (c && (t || c.d < cfg.tool.dia + 1e-3)) round.push({ cx: c.cx, cy: c.cy, d: c.d, depth: Infinity });
+      if (t) drillOps.push({ x: c.cx, y: c.cy, center: [c.cx, c.cy], d: c.d, depth: fullDepth, tool: t, label: x.label, through: true, pi: geo.indexOf(x) });
       else if (c && c.d < cfg.tool.dia + 1e-3) warnings.push(`${x.label}: ${c.d.toFixed(3)}" through hole has no matching drill — skipped`);
       else holes.push(h); // too big for a drill: inside contour, slug drops out
     }
-    x.g = { ...x.g, pockets, holes };
+    // holes drilled into a pocket's floor: the pocket goes straight across them
+    const filled = round.length ? pockets.map((p) => fillHoleBites(p, round)) : pockets;
+    x.g = { ...x.g, pockets: filled, holes };
   }
 
   const home = [0, 0];

@@ -10,7 +10,7 @@ import { SHAPE_ORDERS, placeShapes, isShapePart } from '../public/lib/shapes.js'
 import { normalizeAll } from '../lib/parts.js';
 import { decode } from '../lib/onshape.js';
 import { nestParts, placedGeometry, applySolution, nestKey } from '../public/lib/nest.js';
-import { sheetToolpaths, placeTabs, legsOf, splitLobes, legsFromWalls, offcutCutLines, screwR, screwCheck } from '../public/lib/toolpath.js';
+import { sheetToolpaths, fillHoleBites, placeTabs, legsOf, splitLobes, legsFromWalls, offcutCutLines, screwR, screwCheck } from '../public/lib/toolpath.js';
 import { postGcode, postShopBot, post as postAny, fitArcs } from '../public/lib/post.js';
 import { parsePP } from '../public/lib/vpp.js';
 import { carve, check as simCheck } from '../public/lib/sim.js';
@@ -1068,6 +1068,48 @@ for (const g of groupParts(parts)) {
   const a = nestParts(cabinetOnly.parts, o), b = nestParts(withShapes.parts, o);
   const cab = (n) => JSON.stringify(n.sheets.map((sh) => sh.placements.map((pl) => [pl.label, +pl.x.toFixed(4), +pl.y.toFixed(4), pl.rotated])));
   check(cab(a) === cab(b), 'cabinet parts nest exactly the same with custom shapes in the job');
+}
+
+// --- a hole drilled through a dado's wall line (Blum Tandem hook hole at the back of
+// a drawer side): the dado is cut straight across it, not round it ---
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const d = tl.dadoTool.dia, r = d / 2;
+  const bboxOf = (loops) => { const pts = loops.flat(); return { x0: Math.min(...pts.map((q) => q[0])), y0: Math.min(...pts.map((q) => q[1])), x1: Math.max(...pts.map((q) => q[0])), y1: Math.max(...pts.map((q) => q[1])) }; };
+  const areaOf = (loops) => area(loops);
+  const circ = (cx, cy, rr, n = 64) => Array.from({ length: n }, (_, k) => [cx + rr * Math.cos((2 * Math.PI * k) / n), cy + rr * Math.sin((2 * Math.PI * k) / n)]);
+  // back dado 0.5" wide at x 18.75..19.25, the hole centred on its left wall
+  const dado = [[18.75, 0], [19.25, 0], [19.25, 5], [18.75, 5]];
+  const floor = difference([dado], [circ(18.75, 0.75, r)]);
+  const fb = bboxOf(floor);
+  const pocket = { loops: floor, depth: 0.25, x0: fb.x0, y0: fb.y0, x1: fb.x1, y1: fb.y1 };
+  const out = fillHoleBites(pocket, [{ cx: 18.75, cy: 0.75, d, depth: Infinity }]);
+  const ob = bboxOf(out.loops);
+  check(Math.abs(areaOf(out.loops) - 2.5) < 0.003 && ob.x0 > 18.75 - 0.005 && out.loops.length === 1,
+    `a hole on a dado wall: the floor is filled straight across (area ${areaOf(out.loops).toFixed(4)} of 2.5, left edge ${ob.x0.toFixed(4)})`);
+  const shallow = fillHoleBites(pocket, [{ cx: 18.75, cy: 0.75, d, depth: 0.1 }]);
+  check(shallow === pocket, 'a hole shallower than the floor changes nothing');
+  // through the whole pipeline: the dado's moves at floor depth never go round the hole
+  const part = { id: 'ds', name: 'Drawer side', include: true, qty: 1, grain: 'none', thickness: 0.5, width: 20, height: 5,
+    outline: [[0, 0], [20, 0], [20, 5], [0, 5]], holes: [circ(18.75, 0.75, r).reverse()], pockets: [pocket], material: 'BB 1/2', custom: true };
+  const sh = nestParts([part], { ...s0.sheet, respectGrain: true }).sheets[0];
+  const pl = sh.placements[0];
+  const cfgS = { ...s0, ...tl, holdDown: 'skin', thickness: 0.5 };
+  const tp = sheetToolpaths(sh, cfgS);
+  const res = simCheck(sh, carve(sh, tp.moves, { res: 0.04, dia: tl.tool.dia }), { dia: tl.dadoTool.dia, profileDia: tl.tool.dia, thickness: 0.5, holdDown: 'skin' });
+  check(res.ok, `drawer side with a hole on its dado wall cuts clean (${res.uncut} uncut, ${res.deep} deep)`);
+  // the wall pass on the hole's side is one straight line: no move at floor depth
+  // lies left of the wall line (in the part) by more than the bit radius
+  // the dado's moves stay between its two straight walls (a bit radius in from
+  // each): nothing bulges toward the hole
+  const g = placedGeometry(pl);
+  const pb = bboxOf(g.pockets[0].loops);
+  const across = pb.x1 - pb.x0 < pb.y1 - pb.y0 ? [pb.x0, pb.x1, 'x'] : [pb.y0, pb.y1, 'y'];
+  const inDado = tp.moves.filter((m) => m.g === 1 && m.op !== 'drill' && m.op !== 'profile' && m.op !== 'tab' && m.op !== 'screw' && m.z < -0.01 && m.z > -0.3);
+  const vals = inDado.map((m) => m[across[2]]);
+  const lo = Math.min(...vals) - across[0], hi = across[1] - Math.max(...vals), rr = tl.dadoTool.dia / 2;
+  check(inDado.length > 0 && lo > rr - 0.004 && hi > rr - 0.004, `the dado runs straight past the hole (bit centre ${lo.toFixed(4)}" and ${hi.toFixed(4)}" from the walls, radius ${rr.toFixed(4)})`);
 }
 
 // --- curved custom shapes (arcs as many short segments), turned and turned over:
