@@ -26,7 +26,6 @@
         </label>
         <div class="row">
           <button id="fetchParts" class="primary">Get parts</button>
-          <button id="loadSample">Load sample</button>
         </div>
         <p id="sourceInfo" class="muted small"></p>
         <button id="saveRaw" class="link" hidden>Save raw Onshape data (for troubleshooting)</button>
@@ -176,13 +175,11 @@
         <div class="card-head">
           <h2>Parts</h2>
           <span id="partsSummary" class="muted small"></span>
-          <span class="spacer"></span>
-          <button id="nestBtn" class="primary" disabled>Nest &amp; toolpath</button>
         </div>
         <div id="messages"></div>
         <div id="cabFilter" class="cab-filter" hidden></div>
-        <div id="partsTable" class="table-wrap"><p class="muted empty">Paste a Part Studio URL or load the sample.</p></div>
-        <div class="parts-foot"><button id="groupsToggle" class="link small" hidden>Collapse all</button><span class="spacer"></span><button id="nestBtnBottom" class="primary" disabled>Nest &amp; toolpath</button></div>
+        <div id="partsTable" class="table-wrap"><p class="muted empty">Paste a Part Studio URL and click Get parts, or <button class="link" data-sample>load the sample job</button>.</p></div>
+        <div class="parts-foot"><button id="groupsToggle" class="link small" hidden>Collapse all</button><span class="spacer"></span><button id="nestBtn" class="primary" disabled>Nest &amp; toolpath</button></div>
       </section>
 
       <section class="card" id="cutListCard" hidden>
@@ -214,17 +211,12 @@
           <h2>Sheets</h2>
           <span id="resultsSummary" class="muted small"></span>
           <span class="spacer"></span>
-          <button id="labelsBtn" title="Zebra labels: one strip per sheet">Labels…</button>
-          <button id="constructionBtn" title="Print one page per cabinet for the shop assembling it: front view, a section, the fronts, sizes, heights of the fixed parts, drawer boxes and a parts list (with sheet numbers once nested)">Construction sheets</button>
-          <button id="printLayouts" title="Print every sheet's layout and parts list on an ordinary printer, one page per sheet">Print layouts</button>
-          <button id="markCut" title="Uses up the remnants this job was nested on and keeps its offcuts as new remnants">Mark job as cut</button>
-          <button id="searchAgain" title="Search again from a different starting point; the layout only changes if the new one is better">Search again</button>
-          <label class="check inline"><input type="checkbox" id="showPaths" checked /> Toolpaths</label>
-          <label class="check inline" title="Carve the toolpath into the sheet and check it against the model: every floor cut to depth, nothing deeper than the model, outlines cut through (with tabs). Yellow = left uncut, red = too deep, pink = not cut through."><input type="checkbox" id="showSim" /> Simulate cut</label>
-          <button id="downloadAll">Download all</button>
-          <button id="saveAllFolder" class="primary" hidden title="Write every sheet's file straight into the G-code folder">Save all to folder</button>
-          <span id="outFolder" class="small out-folder" hidden></span>
+          <button id="searchAgain" title="Search again from a different starting point; the layout only changes if the new one is better">Try another nest</button>
+          <button id="printMenuBtn" title="Sheet layouts, construction sheets, labels, the cut list">Print ▾</button>
+          <span class="split-btn"><button id="saveFilesBtn" class="primary"></button><button id="saveFilesMore" class="primary more" title="This sheet only, download instead, the G-code folder">▾</button></span>
+          <button id="markCut" class="mark-cut">Mark as cut…</button>
         </div>
+        <div id="outFolder" class="small out-folder" hidden></div>
         <div id="sheetTabs" class="tabs"></div>
         <div id="labelsPanel" class="labels-panel" hidden>
           <div class="labels-opts">

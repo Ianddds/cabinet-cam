@@ -34,6 +34,22 @@ jobs:
       - name: Test
         run: npm test
 
+      # Make the release (and its tag) first. electron-builder 26 uploads the
+      # installer and its blockmap at the same time and each tried to create the
+      # release, so the second one failed with "Published releases must have a
+      # valid tag". With the release already there they both just upload to it.
+      - name: Create the release
+        shell: bash
+        run: |
+          if gh release view "v${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "Release v${{ inputs.version }} already exists - uploading to it"
+          else
+            gh release create "v${{ inputs.version }}" --target "${{ github.sha }}" --title "${{ inputs.version }}" --notes "Cabinet CAM ${{ inputs.version }}"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+
       # where to publish (this repository's Releases) is in package.json -> build.publish
       - name: Build and publish the installer
         run: npx electron-builder --win --publish always

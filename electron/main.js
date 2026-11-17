@@ -122,6 +122,10 @@ function buildMenu() {
     { label: 'View', submenu: [{ role: 'reload' }, { role: 'forceReload' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }, { role: 'toggleDevTools' }] },
     { label: 'Help', submenu: [
       { label: 'Check for updates…', click: () => checkForUpdates(true) },
+      { type: 'separator' },
+      { label: 'Load the sample job', click: () => win?.webContents.executeJavaScript('window.cabinetCam && window.cabinetCam.loadSample()') },
+      { label: 'Save raw Onshape data (troubleshooting)', click: () => win?.webContents.executeJavaScript('window.cabinetCam && window.cabinetCam.saveRaw()') },
+      { type: 'separator' },
       { label: 'About Cabinet CAM', click: () => dialog.showMessageBox(win, { message: `Cabinet CAM ${app.getVersion()}`, detail: `Data: ${dataDir()}\nAddress: ${baseUrl}` }) },
     ] },
   ]));

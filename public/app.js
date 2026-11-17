@@ -30,6 +30,8 @@ let results = []; // [{ group, sheets: [{ sheet, tp, file, text }] , unplaced }]
 let activeSheet = 0;
 let moveEdit = false;   // sheet view: drag parts by hand (they snap to the nearest spot that fits)
 let screwEdit = false;
+let showPaths = true;   // sheet view: draw the toolpaths
+let showSim = false;    // sheet view: Check cut (carve and check against the model)
 let tabEdit = false;    // sheet view: click to add a tab, drag to move, right-click to remove  // sheet view: click to add a hold-down screw, drag to move, right-click to remove
 let library = structuredClone(DEFAULT_LIBRARY);
 let remnants = []; // shared inventory from the server
@@ -103,7 +105,7 @@ function setDeskPrefs(patch) { try { localStorage.setItem(DESK_KEY, JSON.stringi
 let lastRaw = null;
 function setParts(data) {
   lastRaw = data.raw || null;
-  $('#saveRaw').hidden = !lastRaw;
+  $('#saveRaw').hidden = !lastRaw || !!desk;   // (the desktop app has it in the Help menu)
   delete data.raw;
   const sameSource = job.source?.url && data.source?.url === job.source.url;
   job.parts = sameSource ? carryOverrides(job.parts, data.parts) : data.parts;
@@ -202,7 +204,7 @@ function grainCell(p) {
 function renderParts() {
   const wrap = $('#partsTable');
   if (!job.parts.length) {
-    wrap.innerHTML = '<p class="muted empty">Paste a Part Studio URL or load the sample.</p>';
+    wrap.innerHTML = '<p class="muted empty">Paste a Part Studio URL and click Get parts, or <button class="link" data-sample>load the sample job</button>.</p>';
     $('#nestBtn').disabled = true;
     $('#partsSummary').textContent = '';
     renderCabFilter();
@@ -761,8 +763,7 @@ function renderResults() {
     (results.quick ? ' · quick nest: click Nest & toolpath to search for a better one' : '');
   renderCutState();
   // custom shapes still being fitted: nothing to download or mark cut yet
-  $('#downloadAll').disabled = !!results.pendingShapes;
-  $('#saveAllFolder').disabled = !!results.pendingShapes;
+  $('#saveFilesBtn').disabled = $('#saveFilesMore').disabled = !!results.pendingShapes;
   $('#markCut').disabled = !!results.pendingShapes && !job.cut;
   $('#sheetTabs').innerHTML = all.map((x, i) => {
     const n = results.find((r) => r.sheets.includes(x));
@@ -779,8 +780,6 @@ $('#sheetTabs').addEventListener('click', (e) => {
   activeSheet = +b.dataset.s;
   renderResults();
 });
-$('#showPaths').addEventListener('change', () => renderResults());
-$('#showSim').addEventListener('change', () => renderResults());
 
 // Carve the sheet's toolpath and check it against the model (cached per sheet)
 function simulateSheet(item) {
@@ -798,14 +797,6 @@ function simulateSheet(item) {
   item.sim = { url: c.toDataURL(), result, res, W: sim.W, H: sim.H };
   return item.sim;
 }
-// the Nest & toolpath button again under the parts list: same button, kept in step
-$('#nestBtnBottom').onclick = () => $('#nestBtn').click();
-{
-  const top = $('#nestBtn'), bottom = $('#nestBtnBottom');
-  const sync = () => { bottom.disabled = top.disabled; bottom.textContent = top.textContent; };
-  new MutationObserver(sync).observe(top, { attributes: true, childList: true, characterData: true, subtree: true });
-  sync();
-}
 
 // ---------- G-code folder (desktop app) ----------
 // Files go straight into a folder chosen once on this PC (the ShopBot PC's
@@ -819,12 +810,13 @@ async function chooseOutFolder() {
 }
 function showOutFolder() {
   const el = $('#outFolder');
-  $('#saveAllFolder').hidden = !desk;
+  $('#saveFilesBtn').textContent = desk ? 'Save all to folder' : 'Download all';
+  $('#saveFilesBtn').title = desk ? "Write every sheet's file straight into the G-code folder" : "Download every sheet's file";
   el.hidden = !desk;
   if (!desk) return;
   const f = outFolder();
-  el.innerHTML = f ? `→ <span title="${esc(f)}">${esc(f.length > 38 ? '…' + f.slice(-37) : f)}</span> <a href="#" id="outChange">change</a> · <a href="#" id="outOpen">open</a>`
-    : '<a href="#" id="outChange">choose G-code folder</a>';
+  el.innerHTML = f ? `G-code folder: <span title="${esc(f)}">${esc(f.length > 60 ? '…' + f.slice(-59) : f)}</span> · <a href="#" id="outChange">change</a> · <a href="#" id="outOpen">open</a>`
+    : 'G-code folder: <a href="#" id="outChange">choose one</a> (Save all to folder asks the first time)';
   $('#outChange').onclick = (e) => { e.preventDefault(); chooseOutFolder(); };
   if (f) $('#outOpen').onclick = (e) => { e.preventDefault(); desk.openFolder(f); };
 }
@@ -837,13 +829,30 @@ async function saveToFolder(items) {
   showMessages([{ text: `Saved ${r.written.length === 1 ? r.written[0] : r.written.length + ' files'} to ${folder}${rep}.` }]);
 }
 showOutFolder();
-$('#saveAllFolder').onclick = () => saveToFolder(results.flatMap((r) => r.sheets));
-
-$('#downloadAll').onclick = async () => {
+async function downloadAll() {
   for (const x of results.flatMap((r) => r.sheets)) {
     download(x.file, textFor(x));
     await new Promise((r) => setTimeout(r, 350));
   }
+}
+const allSheets = () => results.flatMap((r) => r.sheets);
+const thisSheet = () => allSheets()[activeSheet];
+// Save files: everything in one go; the arrow for this sheet only, downloading, the folder
+$('#saveFilesBtn').onclick = () => (desk ? saveToFolder(allSheets()) : downloadAll());
+$('#saveFilesMore').onclick = (e) => {
+  const item = thisSheet();
+  const one = item ? item.file : '';
+  showMenuAt(e.currentTarget, desk ? [
+    [`Save this sheet to folder (${one})`, () => saveToFolder([item]), { disabled: !item }],
+    null,
+    ['Download all', () => downloadAll()],
+    [`Download this sheet (${one})`, () => download(item.file, textFor(item)), { disabled: !item }],
+    null,
+    ['Choose G-code folder…', () => chooseOutFolder()],
+    ['Open G-code folder', () => desk.openFolder(outFolder()), { disabled: !outFolder() }],
+  ] : [
+    [`Download this sheet (${one})`, () => download(item.file, textFor(item)), { disabled: !item }],
+  ]);
 };
 
 // Grain on the sheet: length grain runs along the part's long side (part X).
@@ -882,7 +891,7 @@ function renderSheet(item) {
   }
   const flip = (poly) => poly.map(([x, y]) => [x, fy(y)]);
   const partNo = numberPlacements(item.sheet);
-  const sim = $('#showSim').checked ? simulateSheet(item) : null;
+  const sim = showSim ? simulateSheet(item) : null;
   if (sim) svg += `<image href="${sim.url}" x="0" y="${H - sim.H}" width="${sim.W}" height="${sim.H}" preserveAspectRatio="none" style="image-rendering:pixelated"/>`;
   item.sheet.placements.forEach((pl, idx) => {
     const g = placedGeometry(pl);
@@ -901,7 +910,7 @@ function renderSheet(item) {
     svg += `<text class="partno" x="${g.box.x0 + 0.5}" y="${fy(g.box.y1) + 1.6}">#${partNo.get(pl)}</text>`;
     svg += '</g>';
   });
-  if ($('#showPaths').checked) {
+  if (showPaths) {
     let cut = '', rapid = '', tab = '', prev = null;
     for (const m of item.tp.moves) {
       if (m.x == null) continue;
@@ -922,7 +931,7 @@ function renderSheet(item) {
     }
   }
   // tabs: where the bit lifts to leave a bridge (hand-placed ones can be dragged in Place tabs)
-  if (item.tp.tabs?.length && ($('#showPaths').checked || tabEdit)) {
+  if (item.tp.tabs?.length && (showPaths || tabEdit)) {
     const tl = item.cfg.tabs?.length || 0.5, tw = Math.max(0.3, item.cfg.tool.dia * 1.6);
     item.tp.tabs.forEach((t, k) => {
       svg += `<g class="tabmark" data-k="${k}" transform="translate(${t.x.toFixed(3)} ${fy(t.y).toFixed(3)}) rotate(${(-t.a * 180 / Math.PI).toFixed(2)})"><rect x="${-tl / 2}" y="${-tw / 2}" width="${tl}" height="${tw}"><title>Tab${sh.tabsManual ? ' (placed by hand)' : ''}${tabEdit ? ' · drag to move, right-click to remove' : ''}</title></rect>${tabEdit ? '<circle class="tabhit" r="1"/>' : ''}</g>`;
@@ -950,32 +959,45 @@ function renderSheet(item) {
   svg += `<circle class="origin" cx="0" cy="${H}" r="0.5"/>`;
   svg += '</svg>';
   const simNote = !sim ? '' : sim.result.ok
-    ? '<p class="small sim-ok">Simulated: every floor cut to depth, nothing deeper than the model' + (['tabs', 'none'].includes(holdDownOf(item.cfg)) ? ', every outline cut through except at tabs' : '') + '.</p>'
-    : `<p class="small sim-bad">Simulated: ${[sim.result.uncut && `${sim.result.uncut} spots left uncut (yellow)`, sim.result.deep && `${sim.result.deep} spots cut deeper than the model (red)`, sim.result.notThrough && `${sim.result.notThrough} spots of outline not cut through (pink)`, sim.result.screw && `${sim.result.screw} spots cut inside a screw's clearance (blue)`].filter(Boolean).join(' · ')}. Check before cutting.</p>`;
+    ? '<p class="small sim-ok">Check cut: every floor cut to depth, nothing deeper than the model' + (['tabs', 'none'].includes(holdDownOf(item.cfg)) ? ', every outline cut through except at tabs' : '') + '.</p>'
+    : `<p class="small sim-bad">Check cut: ${[sim.result.uncut && `${sim.result.uncut} spots left uncut (yellow)`, sim.result.deep && `${sim.result.deep} spots cut deeper than the model (red)`, sim.result.notThrough && `${sim.result.notThrough} spots of outline not cut through (pink)`, sim.result.screw && `${sim.result.screw} spots cut inside a screw's clearance (blue)`].filter(Boolean).join(' · ')}. Check before cutting.</p>`;
 
   $('#sheetView').innerHTML = `
     <div class="sheet-head">
       <strong>${esc(item.title)}</strong>
       <span class="muted">${item.sheet.placements.length} parts · ${(item.sheet.yield * 100).toFixed(0)}% yield · ${st.cutLength.toFixed(0)}" of cut · ${st.rapidLength.toFixed(0)}" of rapids · ~${st.estMinutes.toFixed(0)} min</span>
       <span class="spacer"></span>
+      <button id="runSimBtn" ${results.pendingShapes ? 'disabled' : ''} title="Play this sheet's file in 3D the way the machine will run it">3D simulation</button>
+    </div>
+    <div class="sheet-tools">
+      <span class="seg" role="group" aria-label="Mode">
+        <button data-mode="view" class="${!moveEdit && !tabEdit && !screwEdit ? 'active' : ''}" title="Look at the sheet">View</button>
+        <button data-mode="move" class="${moveEdit ? 'active' : ''}" ${job.cut || results.pendingShapes ? 'disabled' : ''} title="${job.cut ? 'The job is marked as cut: its layout is fixed' : 'Drag parts by hand on this sheet. A part dropped too close to another part, a screw or the edge goes to the nearest spot where it fits. Right-click to copy, paste or delete.'}">Move parts</button>
+        <button data-mode="tabs" class="${tabEdit ? 'active' : ''}" title="Place tabs by hand on this sheet: click near a part's edge to add one, drag to move, right-click to remove">Tabs</button>
+        <button data-mode="screws" class="${screwEdit ? 'active' : ''}" title="Place hold-down screws by hand on this sheet: click to add, drag to move, right-click to remove">Screws</button>
+      </span>
+      <span class="spacer"></span>
+      <span class="small muted">Show</span>
+      <label class="check inline small"><input type="checkbox" id="showPaths" ${showPaths ? 'checked' : ''}> Toolpaths</label>
+      <label class="check inline small" title="Carve the toolpath into the sheet and check it against the model: every floor cut to depth, nothing deeper than the model, outlines cut through (with tabs). Yellow = left uncut, red = too deep, pink = not cut through."><input type="checkbox" id="showSim" ${showSim ? 'checked' : ''}> Check cut</label>
       <span class="legend"><span><i style="background:var(--path)"></i>cut</span><span><i style="background:var(--rapid)"></i>rapid</span><span><i style="background:var(--pocket)"></i>dado</span><span><i style="background:var(--drill)"></i>drill</span>${usesTabs(item.cfg) ? '<span><i style="background:var(--tab)"></i>tab</span>' : ''}</span>
-      <button id="moveEditBtn" class="${moveEdit ? 'active' : ''}" ${job.cut || results.pendingShapes ? 'disabled' : ''} title="${job.cut ? 'The job is marked as cut: its layout is fixed' : 'Drag parts by hand on this sheet. A part dropped too close to another part, a screw or the edge goes to the nearest spot where it fits.'}">${moveEdit ? 'Done moving' : 'Move parts'}</button>
-      <button id="tabEditBtn" class="${tabEdit ? 'active' : ''}" title="Place tabs by hand on this sheet: click near a part's edge to add one, drag to move, right-click to remove">${tabEdit ? 'Done placing tabs' : 'Place tabs'}</button>
-      <button id="screwEditBtn" class="${screwEdit ? 'active' : ''}" title="Place hold-down screws by hand on this sheet: click to add, drag to move, right-click to remove">${screwEdit ? 'Done placing screws' : 'Place screws'}</button>
-      <button id="runSimBtn" ${results.pendingShapes ? 'disabled' : ''} title="Play this sheet's file in 3D the way the machine will run it">Run simulation</button>
-      <button id="printSheet">Print layout</button>
-      ${desk ? `<button id="saveSheet" class="primary" ${results.pendingShapes ? 'disabled' : ''} title="Write this sheet's file into the G-code folder">Save to folder</button>` : ''}
-      <button id="dlSheet" class="${desk ? '' : 'primary'}" ${results.pendingShapes ? 'disabled title="Custom shapes are still being fitted"' : ''}>Download ${esc(item.file)}</button>
-    </div>${svg}
-    ${simNote}
+    </div>
     ${moveEdit ? `<p class="small screw-help">Moving parts: drag a part where you want it. If it would come too close to another part's cut, a hold-down screw or the edge of the stock, it goes to the nearest spot where it fits (dashed outline while dragging). Right-click a part to copy, delete or put it back; right-click a spot to paste. ${sh.partsMoved || 0} moved${sh.partsAdded ? `, ${sh.partsAdded} pasted` : ''}${sh.partsRemoved ? `, ${sh.partsRemoved} deleted` : ''} on this sheet. <button id="moveReset" ${sh.partsMoved ? '' : 'disabled'}>Put all back</button>${moveMsg ? `<br><span class="${moveMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(moveMsg.replace(/^!/, ''))}</span>` : ''}${job.pendingQty && Object.keys(job.pendingQty).length ? '<br><strong>Parts added or deleted: Nest &amp; toolpath nests again with the new counts.</strong> Until then deleted parts leave their spot empty and pasted ones stay where you put them.' : ''}</p>` : ''}
     ${tabEdit ? `<p class="small screw-help">Placing tabs: click near a part's edge to add a tab there (it goes on the bit's path, along that edge, clear of the corners; on a line two parts share it holds both), drag one to move it, right-click to remove it. ${item.tp.tabs?.length || 0} on this sheet${sh.tabsManual ? ' (placed by hand: parts without one get none)' : ''}. <button id="tabAuto" ${sh.tabsManual ? '' : 'disabled'}>Back to automatic</button> <button id="tabClear" ${item.tp.tabs?.length ? '' : 'disabled'}>Remove all</button>${tabMsg ? `<br><span class="${tabMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(tabMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
     ${screwEdit ? `<p class="small screw-help">Placing screws: click an empty spot to add one, drag to move, right-click to remove. A screw dropped too close to a cut goes to the nearest spot clear of it. Red = a cut or part is too close. ${sh.screws?.length || 0} on this sheet${sh.screwsManual ? ' (placed by hand)' : ''}. <button id="screwAuto" ${sh.screwsManual ? '' : 'disabled'}>Back to automatic</button> <button id="screwClear" ${sh.screws?.length ? '' : 'disabled'}>Remove all</button>${screwMsg ? `<br><span class="${screwMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(screwMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
+    ${svg}
+    ${simNote}
     ${sh.remnant ? `<p class="small"><strong>Remnant R${sh.remnant.no ?? '?'}</strong> (${fraction(sh.w)} × ${fraction(sh.h)}): put its zero corner (the one that was the sheet's zero corner) at the origin, grain along X.</p>` : ''}
     <p class="muted small">Origin (red dot) is front-left of the ${sh.remnant ? 'remnant' : 'sheet'}, X along the ${s.sheetW}" side. Z0 = ${item.cfg.zZero === 'table' ? 'spoilboard' : 'material top'}. Air-cut new posts before running material.</p>`;
-  $('#dlSheet').onclick = () => download(item.file, textFor(item));
-  if (desk) $('#saveSheet').onclick = () => saveToFolder([item]);
-  $('#printSheet').onclick = () => printLayouts([item]);
+  // one mode at a time: View, Move parts, Tabs or Screws
+  for (const b of $('#sheetView').querySelectorAll('[data-mode]')) b.onclick = () => {
+    const m = b.dataset.mode;
+    moveEdit = m === 'move'; tabEdit = m === 'tabs'; screwEdit = m === 'screws';
+    tabMsg = '';
+    renderResults();
+  };
+  $('#showPaths').onchange = (e) => { showPaths = e.target.checked; renderResults(); };
+  $('#showSim').onchange = (e) => { showSim = e.target.checked; renderResults(); };
   $('#runSimBtn').onclick = async () => {
     const btn = $('#runSimBtn');
     btn.disabled = true;
@@ -988,14 +1010,11 @@ function renderSheet(item) {
       showMessages([{ error: true, text: `Couldn't simulate: ${e.message}` }]);
     } finally { btn.disabled = false; }
   };
-  $('#screwEditBtn').onclick = () => { screwEdit = !screwEdit; if (screwEdit) { moveEdit = false; tabEdit = false; } renderResults(); };
-  $('#tabEditBtn').onclick = () => { tabEdit = !tabEdit; if (tabEdit) { moveEdit = false; screwEdit = false; } tabMsg = ''; renderResults(); };
   if (tabEdit) {
     $('#tabAuto').onclick = () => { tabMsg = ''; setSheetTabs(item, null); };
     $('#tabClear').onclick = () => { tabMsg = ''; setSheetTabs(item, []); };
     wireTabEdit(item, $('#sheetView svg'), fy);
   }
-  $('#moveEditBtn').onclick = () => { moveEdit = !moveEdit; if (moveEdit) { screwEdit = false; tabEdit = false; } renderResults(); };
   if (moveEdit && !job.cut && !results.pendingShapes) {
     $('#moveReset').onclick = () => setSheetMoves(item, null);
     wireMoveEdit(item, $('#sheetView svg'), fy);
@@ -1195,23 +1214,45 @@ function commitPending() {
   if (had) delete job.manualMoves;
   return had;
 }
+// items: [text, fn, { disabled, title }?] or null for a line between groups
 function showMenu(x, y, items) {
   document.querySelector('#ctxMenu')?.remove();
   const m = document.createElement('div');
   m.id = 'ctxMenu';
   m.className = 'ctx-menu';
-  for (const [text, fn] of items) {
+  const done = () => { m.remove(); removeEventListener('pointerdown', close, true); removeEventListener('keydown', close, true); };
+  for (const it of items) {
+    if (!it) { if (m.lastChild && m.lastChild.tagName !== 'HR') m.appendChild(document.createElement('hr')); continue; }
+    const [text, fn, o = {}] = it;
     const b = document.createElement('button');
     b.textContent = text;
-    b.onclick = () => { m.remove(); fn(); };
+    b.disabled = !!o.disabled;
+    if (o.title) b.title = o.title;
+    b.onclick = () => { done(); fn(); };
     m.appendChild(b);
   }
   document.body.appendChild(m);
   const r = m.getBoundingClientRect();
   m.style.left = `${Math.min(x, innerWidth - r.width - 8)}px`;
   m.style.top = `${Math.min(y, innerHeight - r.height - 8)}px`;
-  const close = (ev) => { if (!m.contains(ev.target) || ev.key === 'Escape') { m.remove(); removeEventListener('pointerdown', close, true); removeEventListener('keydown', close, true); } };
+  const close = (ev) => {
+    if (m.contains(ev.target) && ev.key !== 'Escape') return;
+    done();
+    // a press on the menu's own button closes it; the click that follows mustn't reopen it
+    if (m.dataset.for && ev.target?.closest?.(`#${m.dataset.for}`)) lastMenuClose = { id: m.dataset.for, at: Date.now() };
+  };
   setTimeout(() => { addEventListener('pointerdown', close, true); addEventListener('keydown', close, true); });
+}
+// a menu dropping from a button (clicking the button again closes it)
+let lastMenuClose = { id: null, at: 0 };
+function showMenuAt(btn, items) {
+  if (lastMenuClose.id === btn.id && Date.now() - lastMenuClose.at < 1000) { lastMenuClose = { id: null, at: 0 }; return; }   // that press closed it
+  const r = btn.getBoundingClientRect();
+  showMenu(r.left, r.bottom + 4, items);
+  const m = document.querySelector('#ctxMenu');
+  m.dataset.for = btn.id;
+  const w = m.getBoundingClientRect().width;
+  m.style.left = `${Math.max(8, Math.min(r.right - w, innerWidth - w - 8))}px`;
 }
 
 // Drag a part: it follows the mouse, red where it can't go, with a dashed
@@ -1584,10 +1625,23 @@ function printLayouts(items) {
   const html = layoutsHTML(items.map(layoutPage), job.name || 'Job');
   printPreview(html, { title: items.length === 1 ? 'Sheet layout' : `Sheet layouts (${job.name || 'Job'})` });
 }
-$('#printLayouts').onclick = () => printLayouts(results.flatMap((r) => r.sheets));
+// Print: everything that goes on paper, in one menu
+$('#printMenuBtn').onclick = (e) => {
+  const item = thisSheet();
+  const cut = cutListRows(runParts().filter((p) => p.qty > 0)).length > 0;
+  showMenuAt(e.currentTarget, [
+    ['Sheet layouts (all sheets)', () => printLayouts(allSheets())],
+    ["This sheet's layout", () => printLayouts([item]), { disabled: !item }],
+    ['Construction sheets', () => printConstruction()],
+    ['Labels…', () => { $('#labelsPanel').hidden = false; renderLabels(); $('#labelsPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }],
+    null,
+    ['Cut list', () => $('#cutListPrint').click(), { disabled: !cut, title: cut ? '' : 'No parts on the cut list (parts not cut on the CNC)' }],
+    ['Cut list as CSV', () => $('#cutListCsv').click(), { disabled: !cut }],
+  ]);
+};
 
 // ---------- construction sheets (one page per cabinet, for assembly) ----------
-$('#constructionBtn').onclick = () => {
+function printConstruction() {
   if (!job.places?.length) {
     showMessages([{ error: true, text: job.parts?.length
       ? 'Construction sheets need where each part sits in the model. Click Get parts again to read the Part Studio with this version.'
@@ -1611,9 +1665,8 @@ $('#constructionBtn').onclick = () => {
   const html = constructionHTML(job.places, { job: job.name || 'Job', where, cabinets });
   if (!html) { showMessages([{ error: true, text: 'No cabinet parts to draw (only parts tagged with a cabinet are drawn).' }]); return; }
   printPreview(html, { title: `Construction sheets (${job.name || 'Job'})`, kind: 'construction' });
-};
+}
 
-$('#labelsBtn').onclick = () => { $('#labelsPanel').hidden = !$('#labelsPanel').hidden; renderLabels(); };
 $('#lblSheet').onclick = (e) => busy(e.target, async () => {
   const item = results.flatMap((r) => r.sheets)[activeSheet];
   await sendLabels(labelsFor(item), item.file.replace(/\.[^.]+$/, '') + '_labels.zpl');
@@ -1681,7 +1734,7 @@ function renderCutState() {
     b.textContent = 'Undo "cut"';
     b.title = `Marked as cut ${new Date(job.cut.at).toLocaleString()}` + (nos.length ? `; new remnants ${nos.join(', ')}` : '');
   } else {
-    b.textContent = 'Mark job as cut';
+    b.textContent = 'Mark as cut…';
     b.title = 'Uses up the remnants this job was nested on and keeps its offcuts as new remnants';
   }
 }
@@ -1696,7 +1749,9 @@ $('#markCut').onclick = async (e) => {
     if (r.kept?.length) showMessages([{ text: `${r.kept.length} of its offcuts were already used by another job and were left in place.` }]);
     job.cut = null;
   } else {
-    if (results.quick && !confirm('This is a quick nest, not a searched one. Mark it as cut anyway?')) return;
+    const usedN = results.flatMap((r) => r.sheets).filter((x) => x.sheet.remnant).length;
+    const keepN = results.flatMap((r) => r.sheets).reduce((a, x) => a + (x.sheet.offcuts?.length || 0), 0);
+    if (!confirm(`Mark this job as cut?\n\n${usedN ? `The ${usedN} remnant${usedN === 1 ? '' : 's'} it was nested on come${usedN === 1 ? 's' : ''} off the rack. ` : ''}${keepN ? `Its ${keepN} offcut${keepN === 1 ? '' : 's'} to keep go${keepN === 1 ? 'es' : ''} on the rack as new remnants. ` : ''}The layout is then fixed. You can undo this.${results.quick ? '\n\nThis is a quick nest, not a searched one.' : ''}`)) return;
     const all = results.flatMap((r) => r.sheets);
     const used = [...new Set(all.filter((x) => x.sheet.remnant).map((x) => x.sheet.remnant.id))];
     const add = [], where = [];
@@ -1747,7 +1802,13 @@ $('#saveRaw').onclick = () => {
   const name = (job.name || 'onshape').replace(/[^\w-]+/g, '_').slice(0, 40);
   download(`${name}_raw.json`, JSON.stringify(lastRaw, null, 1));
 };
-$('#loadSample').onclick = (e) => busy(e.target, async () => setParts(await api('/api/sample')));
+const loadSample = (btn) => busy(btn || $('#fetchParts'), async () => setParts(await api('/api/sample')));
+$('#partsTable').addEventListener('click', (e) => { const b = e.target.closest('[data-sample]'); if (b) loadSample(b); });
+// what the desktop app's Help menu asks for (electron/main.js)
+window.cabinetCam = {
+  loadSample: () => loadSample(),
+  saveRaw: () => (lastRaw ? $('#saveRaw').click() : showMessages([{ text: 'No Onshape data yet: Get parts first.' }])),
+};
 $('#nestBtn').onclick = async () => { activeSheet = 0; await searchNests(false); $('#resultsCard').scrollIntoView({ behavior: 'smooth' }); };
 $('#searchAgain').onclick = () => searchNests(true);
 $('#jobName').addEventListener('input', (e) => { job.name = e.target.value; });

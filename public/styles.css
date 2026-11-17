@@ -210,8 +210,8 @@ tr.group[data-g]:hover td { filter: brightness(0.97); }
 tr.group .caret { display: inline-block; width: 1em; }
 .parts-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 .parts-foot .spacer { flex: 1; }
-.ctx-menu { position: fixed; z-index: 2000; background: var(--card, #fff); border: 1px solid #0003; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.2); padding: 4px; display: flex; flex-direction: column; min-width: 180px; }
-.ctx-menu button { text-align: left; border: 0; background: none; padding: 6px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
+.ctx-menu { position: fixed; z-index: 2000; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.2); padding: 4px; display: flex; flex-direction: column; min-width: 180px; }
+.ctx-menu button { text-align: left; border: 0; background: none; color: inherit; padding: 6px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
 .ctx-menu button:hover { background: rgba(0,0,0,.07); }
 .move-err { color: #c0392b; font-weight: 600; }
 .move-note { color: #1a7f4b; }
@@ -252,3 +252,22 @@ tr.group .caret { display: inline-block; width: 1em; }
 .sheet-svg.tab-edit .tabmark { cursor: grab; }
 .sheet-svg .tabmark .tabhit { fill: transparent; }
 .sheet-svg.tab-edit { cursor: crosshair; }
+
+/* parts: one Nest & toolpath, in a bar pinned to the bottom of the card while the list scrolls */
+.parts-foot { position: sticky; bottom: 0; z-index: 5; background: var(--panel); border-top: 1px solid var(--line); margin: 8px -14px -12px; padding: 10px 14px; border-radius: 0 0 10px 10px; }
+/* Sheets header: Save files with its arrow, Mark as cut set apart */
+.split-btn { display: inline-flex; }
+.split-btn button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.split-btn button.more { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid rgba(255,255,255,.45); padding-left: 8px; padding-right: 8px; }
+.mark-cut { margin-left: 12px; }
+.out-folder { margin: -4px 0 8px; color: var(--muted); }
+/* one sheet: the mode switch and what to show */
+.sheet-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; border-left: 1px solid var(--line); color: var(--ink); background: none; padding: 5px 12px; cursor: pointer; font: inherit; }
+.seg button:first-child { border-left: 0; }
+.seg button.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 600; }
+.seg button:disabled { opacity: .45; cursor: default; }
+.sheet-tools .legend { margin-left: 6px; }
+.ctx-menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
+.ctx-menu button:disabled { opacity: .45; cursor: default; background: none; }
