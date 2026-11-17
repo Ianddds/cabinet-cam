@@ -5,8 +5,8 @@
 // line it's on and how fast it's going can be looked up for playback.
 import { machineProfile, segLimits, planMotion, motionOf } from './machine.js';
 
-const ARC_STEP = (5 * Math.PI) / 180;   // arcs as short straight moves: at most 5 degrees each
-const ARC_CHORD = 0.05;                  //   ... and at most 0.05" long
+const ARC_STEP = (1.5 * Math.PI) / 180;   // arcs as short straight moves: at most 1.5 degrees each
+const ARC_CHORD = 0.01;                    //   ... and at most 0.01" long
 
 /**
  * Read a posted file. Returns { lines, moves, stops }:

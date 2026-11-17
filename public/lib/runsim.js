@@ -84,6 +84,15 @@ export function openRunSim(opts) {
   camera.up.set(0, 0, 1);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
+  // mouse like Onshape: hold the scroll wheel to drag the view, right (or left)
+  // button to turn it, the wheel to zoom in where the pointer is
+  controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
+  controls.screenSpacePanning = true;
+  controls.zoomToCursor = true;
+  // no Windows auto-scroll on a wheel press; dragging the view stops following the bit
+  renderer.domElement.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
+  renderer.domElement.addEventListener('pointerdown', (e) => { if (e.button === 1 && follow) { follow = false; for (const b of root.querySelectorAll('[data-view]')) b.classList.remove('active'); } });
+  renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
   scene.add(new THREE.AmbientLight(0xffffff, 0.75));
   const sun = new THREE.DirectionalLight(0xffffff, 0.9);
   sun.position.set(W * 0.3, -H, 80);
@@ -305,18 +314,26 @@ export function openRunSim(opts) {
   // ---------- cutting the material ----------
   let stamped = { idx: 0, frac: 0 };   // material taken away up to here
   let texDirty = false, dirtyLo = Infinity, dirtyHi = -1, fullUpload = true;
+  // Edge cells are cut part way by how much of the cell the bit covers, so a
+  // curved wall sits where the bit really left it instead of stepping from cell
+  // to cell: radiuses and holes come out smooth, not jagged.
   const stampAt = (x, y, z, r) => {
     if (z >= zTop - 1e-4) return;
-    const i0 = Math.max(0, Math.floor((x - r) / res)), i1 = Math.min(gw - 1, Math.floor((x + r) / res));
-    const j0 = Math.max(0, Math.floor((y - r) / res)), j1 = Math.min(gh - 1, Math.floor((y + r) / res));
-    const r2 = r * r;
+    const reach = r + res;
+    const i0 = Math.max(0, Math.floor((x - reach) / res)), i1 = Math.min(gw - 1, Math.floor((x + reach) / res));
+    const j0 = Math.max(0, Math.floor((y - reach) / res)), j1 = Math.min(gh - 1, Math.floor((y + reach) / res));
+    const reach2 = reach * reach, depth = zTop - z;
     for (let j = j0; j <= j1; j++) {
       const cy = (j + 0.5) * res - y;
       for (let i = i0; i <= i1; i++) {
         const cx = (i + 0.5) * res - x;
-        if (cx * cx + cy * cy > r2) continue;
+        const d2 = cx * cx + cy * cy;
+        if (d2 > reach2) continue;
+        const cov = 0.5 + (r - Math.sqrt(d2)) / res;   // 1 = cell fully cut, 0 = untouched
+        if (cov <= 0) continue;
+        const zz = cov >= 1 ? z : z + (1 - cov) * depth;
         const k = j * gw + i;
-        if (z < height[k]) { height[k] = z; texDirty = true; if (j < dirtyLo) dirtyLo = j; if (j > dirtyHi) dirtyHi = j; }
+        if (zz < height[k]) { height[k] = zz; texDirty = true; if (j < dirtyLo) dirtyLo = j; if (j > dirtyHi) dirtyHi = j; }
       }
     }
   };
