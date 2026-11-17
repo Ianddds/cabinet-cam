@@ -41,6 +41,7 @@ export function openRunSim(opts) {
       <label class="small"><input type="checkbox" id="rsPath" checked> Path</label>
       <label class="small" title="Draw the path over the material instead of down in the cuts"><input type="checkbox" id="rsOnTop"> Path on top</label>
       <label class="small" title="Band the cut walls by the plies of the sheet (off: plain walls)"><input type="checkbox" id="rsPlies"> Plies</label>
+      <label class="small" title="When paused or finished, show the exact cut (true arcs and straight walls, to the thousandth) instead of the grid; hover over it to read X, Y and depth"><input type="checkbox" id="rsExact" checked> Exact</label>
       <label class="small" title="How fine the material is: finer shows sharper cuts but needs a stronger graphics card">Detail <select id="rsQual"><option value="ultra">Ultra</option><option value="fine">Fine</option><option value="normal">Normal</option><option value="fast">Fast</option></select></label>
       <button id="rsClose">Close</button>
     </div>
@@ -56,6 +57,8 @@ export function openRunSim(opts) {
           <div>Feed <b id="rsF">0</b> ipm · Spindle <b id="rsS">off</b></div>
           <div>Bit <b id="rsT"></b></div>
           <div id="rsState" class="rs-state">Ready</div>
+          <div id="rsExactNote" class="muted"></div>
+          <div id="rsProbe" class="rs-probe"></div>
         </div>
         <div class="rs-msg" id="rsMsg" hidden><span id="rsMsgText"></span><button id="rsGo" class="primary">Continue</button></div>
         <div class="small muted" id="rsLineNo"></div>
@@ -394,6 +397,102 @@ export function openRunSim(opts) {
     dirtyHi = -1;
   };
 
+  // ---------- the exact cut ----------
+  // While it plays the grid above carves live. Paused, scrubbed or finished, the
+  // exact cut takes its place: built from the moves cut so far (exactcut.js, in a
+  // worker) with true arcs and straight walls. Hover over it to read the spot.
+  const floorZ0 = zTop - thick;
+  const exactMat = new THREE.ShaderMaterial({
+    side: THREE.DoubleSide,
+    uniforms: { zTop: { value: zTop }, plyT: { value: thick / plies }, plyOn: { value: 0 }, sun: { value: new THREE.Vector3(0.35, -0.55, 0.76).normalize() } },
+    vertexShader: `
+      attribute float kind;
+      varying vec3 vN; varying float vZ; varying float vKind;
+      void main() { vN = normal; vZ = position.z; vKind = kind; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `
+      uniform float zTop; uniform float plyT; uniform float plyOn; uniform vec3 sun;
+      varying vec3 vN; varying float vZ; varying float vKind;
+      void main() {
+        vec3 face = vec3(0.91, 0.83, 0.66), core = vec3(0.86, 0.76, 0.58);
+        vec3 col = vKind < 0.5 ? face : vKind > 1.5 ? core * 0.9 : core;
+        if (vKind > 0.5 && vKind < 1.5) {
+          float ph = fract((zTop - vZ) / plyT);
+          float band = smoothstep(0.35, 0.5, ph) - smoothstep(0.85, 1.0, ph);
+          col = mix(core, core * 0.88, band * plyOn);
+        }
+        vec3 n = normalize(vN);
+        if (!gl_FrontFacing && vKind > 0.5 && vKind < 1.5) n = -n;
+        float l = 0.45 + 0.55 * max(dot(n, sun), 0.0) + 0.12 * max(dot(n, normalize(vec3(-0.5, 0.6, 0.6))), 0.0);
+        gl_FragColor = vec4(col * l, 1.0);
+      }`,
+  });
+  let exactMesh = null, exactAt = -1, exactReq = 0, exactTimer = 0, worker = null;
+  const exactOn = () => $('#rsExact').checked && $('#rsMat').checked;
+  const showExact = (on) => {
+    const show = on && !!exactMesh && exactOn();
+    if (exactMesh) exactMesh.visible = show;
+    surface.visible = !show && $('#rsMat').checked;
+    if (!show) $('#rsProbe').textContent = '';
+  };
+  const requestExact = () => {
+    clearTimeout(exactTimer);
+    if (!exactOn()) { showExact(false); $('#rsExactNote').textContent = ''; return; }
+    if (exactMesh && Math.abs(exactAt - t) < 1e-9) { showExact(true); return; }
+    showExact(false);
+    exactTimer = setTimeout(() => {
+      const st = T.at(t);
+      if (!st) return;
+      const moves = [];
+      const last = st.done ? st.idx : st.idx - 1;
+      for (let i = 0; i <= last; i++) {
+        const m = T.moves[i];
+        if (Math.min(m.a[2], m.b[2]) < zTop - 1e-4) moves.push({ a: m.a, b: m.b, r: (toolOf(m.tool).dia || 0.25) / 2 });
+      }
+      if (!st.done && st.frac > 0) { const m = T.moves[st.idx]; if (Math.min(m.a[2], st.p[2]) < zTop - 1e-4) moves.push({ a: m.a, b: st.p, r: (toolOf(m.tool).dia || 0.25) / 2 }); }
+      worker ||= new Worker(new URL('./exact-worker.js', import.meta.url), { type: 'module' });
+      const id = ++exactReq, tReq = t;
+      $('#rsExactNote').textContent = 'Building the exact cut…';
+      worker.onmessage = (e) => {
+        const d = e.data;
+        if (d.id !== exactReq) return;
+        if (d.error) { $('#rsExactNote').textContent = `Exact cut not available: ${d.error}`; return; }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(d.position, 3));
+        g.setAttribute('normal', new THREE.BufferAttribute(d.normal, 3));
+        g.setAttribute('kind', new THREE.BufferAttribute(d.kind, 1));
+        g.computeBoundingSphere();
+        if (exactMesh) { scene.remove(exactMesh); exactMesh.geometry.dispose(); }
+        exactMesh = new THREE.Mesh(g, exactMat);
+        scene.add(exactMesh);
+        exactAt = tReq;
+        $('#rsExactNote').textContent = 'Exact cut (hover to measure)';
+        showExact(!playing && Math.abs(t - tReq) < 1e-9);
+      };
+      worker.postMessage({ id, moves, opts: { zTop, floorZ: floorZ0, W, H } });
+    }, 250);
+  };
+  // hover: where the pointer is on the exact cut, and how deep
+  const ray = new THREE.Raycaster();
+  let probeAt = 0;
+  renderer.domElement.addEventListener('pointermove', (e) => {
+    if (!exactMesh || !exactMesh.visible || e.buttons) return;
+    const now = performance.now();
+    if (now - probeAt < 60) return;
+    probeAt = now;
+    const r = renderer.domElement.getBoundingClientRect();
+    ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+    const hit = ray.intersectObject(exactMesh, false)[0];
+    if (!hit) { $('#rsProbe').textContent = ''; return; }
+    const p = hit.point, k = hit.face ? d0(hit) : null;
+    const depth = zTop - p.z;
+    $('#rsProbe').innerHTML = `Pointer X <b>${p.x.toFixed(3)}</b> Y <b>${p.y.toFixed(3)}</b> · ${depth < 5e-4 ? 'top of the sheet' : `depth <b>${depth.toFixed(3)}</b>`}${k ? ` · ${k}` : ''}`;
+  });
+  // what was hit: a wall (and which way it faces) or a floor
+  const d0 = (hit) => {
+    const kind = exactMesh.geometry.getAttribute('kind').getX(hit.face.a);
+    return kind === 1 ? 'wall' : kind === 2 ? 'floor' : '';
+  };
+
   // ---------- G-code lines ----------
   let shownLine = -1;
   const showLines = (line) => {
@@ -409,7 +508,7 @@ export function openRunSim(opts) {
   // ---------- playback ----------
   let t = 0, playing = false, last = performance.now(), waitStop = null, raf = 0, lastTex = 0;
   const stopsToHalt = () => ($('#rsStops').checked ? T.stops.filter((s) => s.kind === 'tool' || s.kind === 'stop') : []);
-  const setPlaying = (on) => { playing = on; $('#rsPlay').textContent = on ? '⏸' : '▶'; last = performance.now(); };
+  const setPlaying = (on) => { playing = on; $('#rsPlay').textContent = on ? '⏸' : '▶'; last = performance.now(); if (on) { clearTimeout(exactTimer); showExact(false); } else requestExact(); };
   const showStop = (s) => {
     waitStop = s;
     $('#rsMsg').hidden = !s;
@@ -458,6 +557,7 @@ export function openRunSim(opts) {
     for (const s of T.stops) s.passed = s.t < t - 1e-9;
     showStop(null);
     update();
+    if (!playing) requestExact();
   };
   $('#rsPlay').onclick = () => { if (waitStop) { const s = waitStop; showStop(null); t = s.t + s.sec; } if (t >= T.total) seek(0); setPlaying(!playing || !!waitStop); };
   $('#rsGo').onclick = () => { const s = waitStop; showStop(null); t = s.t + s.sec; update(); setPlaying(true); };
@@ -469,11 +569,13 @@ export function openRunSim(opts) {
     setPlaying(false);
   };
   $('#rsScrub').oninput = (e) => { setPlaying(false); seek((+e.target.value / 1000) * T.total); };
-  $('#rsMat').onchange = () => { if ($('#rsMat').checked) update(); else { resetMaterial(); } tex.needsUpdate = true; };
+  $('#rsMat').onchange = () => { if ($('#rsMat').checked) update(); else { resetMaterial(); } tex.needsUpdate = true; if (!playing) requestExact(); else showExact(false); };
+  $('#rsExact').checked = (() => { try { return localStorage.getItem('cabinetcam.simExact') !== '0'; } catch { return true; } })();
+  $('#rsExact').onchange = () => { try { localStorage.setItem('cabinetcam.simExact', $('#rsExact').checked ? '1' : '0'); } catch { /* not kept */ } if (!playing) requestExact(); };
   $('#rsPath').onchange = () => { future.visible = done.visible = rapids.visible = ahead.visible = $('#rsPath').checked; };
   $('#rsOnTop').onchange = () => pathOnTop($('#rsOnTop').checked);
   // ply bands on the walls: off by default (plain walls read cleaner on radiuses), remembered
-  const setPlies = (on) => { surfMat.uniforms.plyOn.value = on ? 1 : 0; try { localStorage.setItem('cabinetcam.simPlies', on ? '1' : '0'); } catch { /* not kept */ } };
+  const setPlies = (on) => { surfMat.uniforms.plyOn.value = on ? 1 : 0; exactMat.uniforms.plyOn.value = on ? 1 : 0; try { localStorage.setItem('cabinetcam.simPlies', on ? '1' : '0'); } catch { /* not kept */ } };
   $('#rsPlies').checked = (() => { try { return localStorage.getItem('cabinetcam.simPlies') === '1'; } catch { return false; } })();
   setPlies($('#rsPlies').checked);
   $('#rsPlies').onchange = () => setPlies($('#rsPlies').checked);
@@ -496,12 +598,14 @@ export function openRunSim(opts) {
     removeEventListener('keydown', key);
     controls.dispose();
     surfG.dispose(); surfMat.dispose(); tex.dispose(); pathG.dispose(); doneG.dispose(); rapG.dispose(); aheadG.dispose();
+    clearTimeout(exactTimer); worker?.terminate(); if (exactMesh) exactMesh.geometry.dispose(); exactMat.dispose();
     renderer.dispose();
     root.remove();
   };
   $('#rsClose').onclick = close;
   addEventListener('keydown', key);
   update();
+  requestExact();
   raf = requestAnimationFrame(frame);
-  return { close, timeline: T, program: prog, seek: (x) => seek(x), state: () => T.at(t), material: { height, gw, gh, res } };
+  return { close, timeline: T, program: prog, seek: (x) => seek(x), state: () => T.at(t), material: { height, gw, gh, res }, exact: () => ({ mesh: exactMesh, at: exactAt, visible: !!exactMesh?.visible }) };
 }

@@ -81,7 +81,8 @@ class PathBuilder {
     return h > 0 ? Math.min(Math.max(h, 0.05), this.safeZ) : this.safeZ;
   }
   hopTo(x, y, z) {
-    const clear = this.hopHeight();
+    // (hopOk: when set, a hop it turns down goes up to safe Z instead)
+    const clear = this.hopOk && this.x != null && !this.hopOk([this.x, this.y], [x, y]) ? this.safeZ : this.hopHeight();
     if (this.x == null) { this.startAt(x, y, z); return; }
     if (this.z < clear) this.rapidZ(clear);
     this.moves.push({ g: 0, x, y, z: this.z });
@@ -776,6 +777,22 @@ const distToPoly = (p, pts, closed) => {
 };
 
 // Plan one group of touching pockets.
+// a region's separate pieces, each outer boundary with the holes inside it
+function componentsOf(reg) {
+  const loops = reg.filter((l) => l.length > 2);
+  if (loops.length < 2) return [loops];
+  const big = loops.reduce((a, b) => (Math.abs(signedArea(b)) > Math.abs(signedArea(a)) ? b : a));
+  const sgn = Math.sign(signedArea(big));
+  const outers = loops.filter((l) => Math.sign(signedArea(l)) === sgn);
+  if (outers.length < 2) return [loops];
+  const comps = outers.map((o) => [o]);
+  for (const h of loops.filter((l) => Math.sign(signedArea(l)) !== sgn)) {
+    const k = outers.findIndex((o) => pointInPolygon(h[0], o));
+    (comps[k >= 0 ? k : 0]).push(h);
+  }
+  return comps;
+}
+
 function planGroup(pockets, g, tool, warnings, label, opts) {
   const r = tool.dia / 2;
   const ext = opts.overtravel ?? r + 0.02;
@@ -789,9 +806,16 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
   // shallowest first, each depth at its own stepdown. While a shallower floor is
   // cut, a deeper one it touches counts as open (it gets cut away later); a
   // floor already cut at least this deep is open too.
-  const classes = depths.map((d) => {
+  // A depth's floors that don't touch (two dados that both run into one rabbet,
+  // or a dado in each of two joined parts) are classes of their own: each is
+  // taken down all the way before the bit moves to the next, instead of going
+  // back and forth between them at every stepdown.
+  const classes = depths.flatMap((d) => {
     const members = pockets.map((p, i) => ({ p, reg: regions[i] })).filter(({ p }) => Math.abs(p.depth - d) < 1e-5);
-    return { d, members, reg: members.length === 1 ? members[0].reg : union(members.flatMap((m) => m.reg), [], 'nonzero') };
+    const reg = members.length === 1 ? members[0].reg : union(members.flatMap((m) => m.reg), [], 'nonzero');
+    const comps = componentsOf(reg);
+    if (comps.length < 2) return [{ d, members, reg }];
+    return comps.map((c) => ({ d, reg: c, members: members.filter((m) => area(intersect(m.reg, c)) > 1e-7) })).filter((c) => c.members.length);
   });
   const lv = [];
   let fromRecords = false;
@@ -840,7 +864,26 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
         if (others.length) region = difference(region, difference(union(others, [], 'nonzero'), [rect(leg, 1e-3)]));
         const mine = leg.clip ? difference(region, leg.clip) : region;
         const use = mine.filter((l) => area([l]) > 1e-5);
-        if (use.length) rowSets.push({ alongX: leg.alongX, rows: planRows(use, leg.alongX, legStep, false, null) });
+        // rows spaced across the leg's own width (wall to wall), not across the
+        // wider area where it opens into a rabbet or slot: a 3/4" dado with a 3/8"
+        // bit is one middle row and its two wall passes, not two rows and the walls
+        // (only a side that's a wall is held in; an open side runs out as before)
+        const ub = use.length ? bbox(use.flat()) : null;
+        const wallAt = (v) => fin.some((e) => (leg.alongX
+          ? Math.abs(e.a[1] - v) < 1e-3 && Math.abs(e.b[1] - v) < 1e-3 && Math.min(Math.max(e.a[0], e.b[0]), leg.x1) - Math.max(Math.min(e.a[0], e.b[0]), leg.x0) > 0.05
+          : Math.abs(e.a[0] - v) < 1e-3 && Math.abs(e.b[0] - v) < 1e-3 && Math.min(Math.max(e.a[1], e.b[1]), leg.y1) - Math.max(Math.min(e.a[1], e.b[1]), leg.y0) > 0.05));
+        let range = null;
+        if (ub) {
+          const [c0, c1] = leg.alongX ? [leg.y0, leg.y1] : [leg.x0, leg.x1];
+          const [u0, u1] = leg.alongX ? [ub.y0, ub.y1] : [ub.x0, ub.x1];
+          const w0 = wallAt(c0), w1 = wallAt(c1);
+          let lo = w0 ? c0 + r : u0, hi = w1 ? c1 - r : u1;
+          if (hi < lo) lo = hi = (lo + hi) / 2;
+          range = [lo, hi];
+        }
+        // (a row on a wall line is trimmed below to where the wall pass doesn't
+        // already cut - beside a toe-kick notch, say - and any stub left dropped)
+        if (use.length) rowSets.push({ alongX: leg.alongX, rows: planRows(use, leg.alongX, legStep, false, range) });
       }
     } else {
       const cb = bbox(core.flat());
@@ -871,6 +914,18 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
           if ((covered || k === n) && runStart !== null) { pushRun(runStart, covered ? Math.max(runStart, t - 1 / n) : t); runStart = null; }
         }
       }
+      // a row whose whole cut the wall passes make anyway (and what a deeper
+      // depth takes away later) isn't needed: left out, so it can't pin where
+      // the depth has to start (a stub left where a slot meets a deeper rabbet)
+      if (segs.length && chains.length) {
+        const keepFloor = openExtra.length ? difference(floor, openExtra) : floor;
+        const walls = union(chains.flatMap((c) => sweptOf(c.closed ? [...c.pts, c.pts[0]] : c.pts, r + 1e-3)), [], 'nonzero');
+        for (let k = segs.length - 1; k >= 0; k--) {
+          if (dist(segs[k][0], segs[k][1]) > 3 * tool.dia) continue;   // only stubs: a dado's middle row stays (walls last)
+          const need = intersect(sweptOf(segs[k], r - 0.004), keepFloor);
+          if (!need.length || area(difference(need, walls)) < 2e-4) segs.splice(k, 1);
+        }
+      }
       if (!segs.length) continue;
       // positions across the leg; start at the one farthest from the finished
       // edges, work out to one side, then the other (smaller side first)
@@ -898,6 +953,117 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
   }
   if (!lv.length) return null;
   return { label, desc, depth: depths[depths.length - 1], levels: lv, fromRecords };
+}
+
+// ---- dados that carry on into the next part ----
+// A dado or rabbet that runs out of one part's edge, with one in the part across
+// the gap running out toward it (same depth, lined up or up to JOIN_JOG apart
+// sideways), is cut as one pocket with a bridge through the gap between them.
+// The gap is waste (the profiles cut it away), the bridge is kept clear of
+// every other part and of the screws, and the bit can only go where it fits.
+const JOIN_GAP = 1.0;   // inch: the widest gap a dado is carried across
+const JOIN_JOG = 0.5;   // inch: how far apart sideways the two ends can be
+function runOutEnds(floor, partRegion, outline, members) {
+  const regs = members.map((p) => ({ p, reg: union(p.loops, []) }));
+  const ends = [];
+  for (const l of floor) for (let k = 0; k < l.length; k++) {
+    const a = l[k], b = l[(k + 1) % l.length], L = dist(a, b);
+    if (L < 0.05) continue;
+    const m = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    if (distToPoly(a, outline, true) > 1e-3 || distToPoly(b, outline, true) > 1e-3 || distToPoly(m, outline, true) > 1e-3) continue;
+    const t = [(b[0] - a[0]) / L, (b[1] - a[1]) / L];
+    let n = [t[1], -t[0]];
+    if (inRegion([m[0] + n[0] * 0.01, m[1] + n[1] * 0.01], partRegion)) n = [-n[0], -n[1]];
+    if (inRegion([m[0] + n[0] * 0.01, m[1] + n[1] * 0.01], partRegion)) continue;
+    const inside = [m[0] - n[0] * 0.01, m[1] - n[1] * 0.01];
+    const hit = regs.find((rg) => inRegion(inside, rg.reg));
+    if (hit) ends.push({ a, b, t, n, depth: hit.p.depth });
+  }
+  return ends;
+}
+export function joinAcross(groupsAll, geo, tool, keepOut = [], skip = new Set()) {
+  const r = tool.dia / 2;
+  const parts = geo.map((x) => difference([x.g.outline], x.g.holes));
+  const info = groupsAll.map((gr) => {
+    const x = geo[gr.pi];
+    const floor = intersect(union(gr.members.flatMap((p) => p.loops), [], 'nonzero'), parts[gr.pi]).filter((l) => area([l]) > 1e-7);
+    return { ...gr, ends: floor.length ? runOutEnds(floor, parts[gr.pi], x.g.outline, gr.members) : [] };
+  });
+  const parent = info.map((_, i) => i);
+  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const bridges = info.map(() => []);
+  const rect = (o, t, n, s0, s1, d0, d1) => ensureCCW([[o[0] + t[0] * s0 + n[0] * d0, o[1] + t[1] * s0 + n[1] * d0], [o[0] + t[0] * s1 + n[0] * d0, o[1] + t[1] * s1 + n[1] * d0],
+    [o[0] + t[0] * s1 + n[0] * d1, o[1] + t[1] * s1 + n[1] * d1], [o[0] + t[0] * s0 + n[0] * d1, o[1] + t[1] * s0 + n[1] * d1]]);
+  for (let i = 0; i < info.length; i++) for (let j = i + 1; j < info.length; j++) {
+    const A = info[i], B = info[j];
+    if (A.pi === B.pi || !A.ends.length || !B.ends.length) continue;
+    for (const ea of A.ends) for (const eb of B.ends) {
+      if (Math.abs(ea.depth - eb.depth) > 1e-4) continue;
+      if (ea.n[0] * eb.n[0] + ea.n[1] * eb.n[1] > -0.999) continue;          // facing each other
+      const along = (p) => (p[0] - ea.a[0]) * ea.t[0] + (p[1] - ea.a[1]) * ea.t[1];
+      const across = (p) => (p[0] - ea.a[0]) * ea.n[0] + (p[1] - ea.a[1]) * ea.n[1];
+      const gap = across(eb.a);
+      if (!(gap > 1e-3 && gap <= JOIN_GAP) || Math.abs(across(eb.b) - gap) > 1e-3) continue;
+      const sa = [0, dist(ea.a, ea.b)], sb = [along(eb.a), along(eb.b)].sort((u, v) => u - v);
+      if (Math.max(sa[0], sb[0]) - Math.min(sa[1], sb[1]) > JOIN_JOG) continue;   // too far apart sideways
+      const s0 = Math.min(sa[0], sb[0]), s1 = Math.max(sa[1], sb[1]);
+      // the bridge: only in the gap (no part's material) and clear of every other part and screw
+      const core = rect(ea.a, ea.t, ea.n, s0, s1, 0.002, gap - 0.002);
+      if (area(intersect([core], union([...parts[A.pi], ...parts[B.pi]], [], 'nonzero'))) > 1e-6) continue;
+      const others = geo.filter((_, k) => k !== A.pi && k !== B.pi).map((o) => o.g.outline);
+      const block = [...(others.length ? offset(others, r + 0.03, 'round') : []), ...keepOut];
+      // Where both parts have material beside the dado's side wall, the gap
+      // beside the bridge counts as part too ("solid"): the wall's finishing
+      // pass runs straight on across the gap into the next part's wall instead
+      // of wrapping round each part's corner and lifting.
+      const m = r + 0.1;
+      const solidAt = (sv, dir) => [[A, ea, 0.005], [B, eb, gap - 0.005]].every(([P, , d]) => {
+        const q = [ea.a[0] + ea.t[0] * (sv + dir * 0.01) + ea.n[0] * (d < gap / 2 ? -0.005 : gap + 0.005), ea.a[1] + ea.t[1] * (sv + dir * 0.01) + ea.n[1] * (d < gap / 2 ? -0.005 : gap + 0.005)];
+        return inRegion(q, parts[P.pi]);
+      });
+      const lo = solidAt(s0, -1) ? m : 0, hi = solidAt(s1, 1) ? m : 0;
+      const span = rect(ea.a, ea.t, ea.n, s0 - r - lo, s1 + r + hi, -0.002, gap + 0.002);
+      if (block.length && area(intersect([span], union(block, [], 'nonzero'))) > 1e-6) continue;
+      if ((lo || hi) && area(intersect([rect(ea.a, ea.t, ea.n, s0 - lo, s1 + hi, 0.002, gap - 0.002)], union([...parts[A.pi], ...parts[B.pi]], [], 'nonzero'))) > 1e-6) continue;
+      bridges[i].push({ loops: [rect(ea.a, ea.t, ea.n, s0, s1, -0.002, gap + 0.002)], depth: ea.depth, bridge: true,
+        solid: [lo && rect(ea.a, ea.t, ea.n, s0 - lo, s0, -0.002, gap + 0.002), hi && rect(ea.a, ea.t, ea.n, s1, s1 + hi, -0.002, gap + 0.002)].filter(Boolean) });
+      parent[find(i)] = find(j);
+    }
+  }
+  const byRoot = new Map();
+  info.forEach((gr, i) => { const k = find(i); if (!byRoot.has(k)) byRoot.set(k, []); byRoot.get(k).push(i); });
+  const out = [];
+  let n = -1;   // the joins, numbered in a fixed order (skip: the ones left out)
+  for (const idx of byRoot.values()) {
+    const pis = [...new Set(idx.map((i) => info[i].pi))];
+    const alone = (skipped = false) => idx.forEach((i, k) => out.push({ pi: info[i].pi, pis: [info[i].pi], members: info[i].members, bridges: [], skipped: skipped && k === 0 }));
+    if (pis.length < 2) { alone(); continue; }
+    const br = idx.flatMap((i) => bridges[i]);
+    // the parts and bridges as one outline (with any enclosed gaps as holes)
+    const loops = union([...pis.map((k) => geo[k].g.outline), ...br.flatMap((b) => [b.loops[0], ...b.solid])], [], 'nonzero').sort((u, v) => Math.abs(signedArea(v)) - Math.abs(signedArea(u)));
+    const outer = loops[0], sgn = Math.sign(signedArea(outer));
+    if (loops.slice(1).some((l) => Math.sign(signedArea(l)) === sgn)) { alone(); continue; }   // didn't join up
+    n++;
+    if (skip.has(n)) { alone(true); continue; }
+    const g = { outline: outer, holes: [...pis.flatMap((k) => geo[k].g.holes), ...loops.slice(1)], box: bbox(outer), pockets: [] };
+    out.push({ pi: pis[0], pis, g, members: idx.flatMap((i) => info[i].members), bridges: br });
+  }
+  return out;
+}
+
+// the area a bit of radius r sweeps along a polyline
+function sweptOf(pts, r) {
+  const out = [];
+  for (let i = 0; i < pts.length; i++) {
+    out.push(circlePoly(pts[i][0], pts[i][1], r, 20));
+    if (i + 1 < pts.length) {
+      const a = pts[i], b = pts[i + 1], L = dist(a, b);
+      if (L < 1e-9) continue;
+      const n = [-(b[1] - a[1]) / L * r, (b[0] - a[0]) / L * r];
+      out.push(ensureCCW([[a[0] + n[0], a[1] + n[1]], [b[0] + n[0], b[1] + n[1]], [b[0] - n[0], b[1] - n[1]], [a[0] - n[0], a[1] - n[1]]]));
+    }
+  }
+  return union(out, [], 'nonzero');
 }
 
 // A finishing chain as a path from the end (or point) nearest pos, taking its
@@ -1580,7 +1746,25 @@ export function fillHoleBites(pocket, circles) {
   return { ...pocket, loops: loops.map((l, i) => (i === 0 ? ensureCCW(l) : ensureCW(l))) };
 }
 
+// Dados joined across parts (joinAcross) usually save a lift and a trip, but
+// not always (a part whose dados already flow in one pass can do worse joined),
+// so the sheet is planned with every join, then with each join left out in
+// turn, and the fastest is kept.
 export function sheetToolpaths(sheet, cfg) {
+  if (cfg.joinDados === false) return sheetPlan(sheet, cfg, null);
+  if (cfg.joinDados === 'all') return sheetPlan(sheet, cfg, new Set());   // every join, faster or not
+  let best = sheetPlan(sheet, cfg, new Set());
+  let skip = new Set();
+  for (let k = 0; k < (best.joins || 0); k++) {
+    const trial = new Set([...skip, k]);
+    const r = sheetPlan(sheet, cfg, trial);
+    if (r.stats.estMinutes < best.stats.estMinutes - 1e-4) { best = r; skip = trial; }
+  }
+  best.stats.joinedDados = (best.joins || 0) - skip.size;
+  return best;
+}
+
+function sheetPlan(sheet, cfg, joinSkip) {
   const warnings = [];
   const pb = new PathBuilder(cfg.safeZ);
   pb.hopZ = cfg.hopZ ?? 0.1;
@@ -1719,12 +1903,13 @@ export function sheetToolpaths(sheet, cfg) {
   const clippedParts = new Set();
   // screw spots: no cutter edge within the screw clearance radius
   const screwDiscs = SCR ? sheet.screws.map((q) => circlePoly(q.x, q.y, screwR(SCR) + dado.dia / 2, 24)) : [];
-  const avoidFor = (pi) => {
-    const others = geo.filter((_, k) => k !== pi && geo[pi].g.pockets.length).map((o) => o.g.outline);
+  const avoidFor = (pis) => {
+    const others = geo.filter((_, k) => !pis.includes(k)).map((o) => o.g.outline);
     const grown = others.length ? offset(others, dado.dia / 2 + 0.03, 'round') : [];   // round: square corners would stop run-outs early near a corner
     return screwDiscs.length ? union([...grown, ...screwDiscs], []) : grown;
   };
-  geo.forEach(({ g, label }, pi) => {
+  const groupsAll = [];   // { pi, members }: each part's pockets that touch, as one operation
+  geo.forEach(({ g }, pi) => {
     // pockets that touch (floors overlap or share an edge) are one operation
     const regs = g.pockets.map((p) => union(p.loops, []));
     const grow = regs.map((rg) => offset(rg, 0.005, 'miter'));
@@ -1737,13 +1922,24 @@ export function sheetToolpaths(sheet, cfg) {
     }
     const groups = new Map();
     g.pockets.forEach((p, i) => { const k = find(i); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); });
-    for (const members of groups.values()) {
-      // wall passes: 'climb' (default), 'conventional', or 'either' (whichever is shorter)
-      const fd = cfg.finishDir || 'climb';
-      const plan = planGroup(members, g, dado, warnings, label, { finishClimb: fd !== 'conventional', finishEither: fd === 'either', overtravel: overtravel(), avoid: avoidFor(pi), onClip: () => clippedParts.add(label) });
-      if (plan) plans.push({ ...plan, pi, id: plans.length, center: [(g.box.x0 + g.box.x1) / 2, (g.box.y0 + g.box.y1) / 2] });
-    }
+    for (const members of groups.values()) groupsAll.push({ pi, members });
   });
+  // Dados and rabbets that run out of one part straight into one in the part
+  // beside it (same depth, across the gap, lined up or a short jog apart)
+  // become one operation: the bit carries on through the gap - waste, cut away
+  // by the profiles anyway - instead of lifting, crossing and plunging again.
+  const clusters = !joinSkip ? groupsAll.map((gr) => ({ ...gr, pis: [gr.pi], bridges: [] })) : joinAcross(groupsAll, geo, dado, screwDiscs, joinSkip);
+  const joinCount = clusters.filter((c) => c.pis.length > 1 || c.skipped).length;
+  for (const cl of clusters) {
+    // wall passes: 'climb' (default), 'conventional', or 'either' (whichever is shorter)
+    const fd = cfg.finishDir || 'climb';
+    const joined = cl.pis.length > 1;
+    const label = cl.pis.map((k) => geo[k].label).join(' + ');
+    const g = joined ? cl.g : geo[cl.pi].g;
+    const members = joined ? [...cl.members.map((p) => ({ ...p, walls: undefined })), ...cl.bridges] : cl.members;
+    const plan = planGroup(members, g, dado, warnings, label, { finishClimb: fd !== 'conventional', finishEither: fd === 'either', overtravel: overtravel(), avoid: avoidFor(cl.pis), onClip: () => clippedParts.add(label) });
+    if (plan) plans.push({ ...plan, pi: cl.pis[0], pis: cl.pis, joined, hopReg: joined ? offset([g.outline], reachR, 'miter') : null, id: plans.length, center: [(g.box.x0 + g.box.x1) / 2, (g.box.y0 + g.box.y1) / 2] });
+  }
   if (clippedParts.size) warnings.push(`${clippedParts.size} part${clippedParts.size === 1 ? '' : 's'} (${[...clippedParts].slice(0, 4).join(', ')}${clippedParts.size > 4 ? '…' : ''}): a dado runs out toward a part closer than a bit width plus 0.05", so it stops 0.03" short of that part instead of running half the bit past the edge`);
   // Tool order: drilling first, and each bit loaded once with everything it
   // does: drill-only bits (their holes) -> dado bit (holes, then dados) ->
@@ -1774,6 +1970,12 @@ export function sheetToolpaths(sheet, cfg) {
   // starts: the start point chosen for each class
   const runGroup = (pl, P, real, only = null, starts = null, order = null) => {
     P.op = 'pocket';
+    // a dado joined across parts: low hops only over those parts (and the gap between them)
+    P.hopOk = pl.joined ? (a, b) => {
+      const n = Math.max(2, Math.ceil(dist(a, b) / 0.25));
+      for (let k = 0; k <= n; k++) if (!inOrOn([a[0] + ((b[0] - a[0]) * k) / n, a[1] + ((b[1] - a[1]) * k) / n], pl.hopReg)) return false;
+      return true;
+    } : null;
     if (only == null) P.comment(`${pl.label} pocket ${pl.desc}${pl.fromRecords ? ' (cut records)' : ''}`);
     let first = true;
     let cutSegs = [], prevL = null, prevCut = [];
@@ -1825,7 +2027,7 @@ export function sheetToolpaths(sheet, cfg) {
         if (got < 0.02 || dz / got > Math.tan((Math.min(80, rampAngle + 1) * Math.PI) / 180)) return false;   // no room for the ramp: plunge
         const R = pts[pts.length - 1];
         if (mode === 'start') { P.rapidTo(R[0], R[1], real ? lowTo(pl.pi)(R) : false); if (P.z > zTop + 0.05) P.rapidZ(zTop + 0.05); }
-        else if (mode === 'hop') { const hh = P.hopHeight(); if (P.z < hh) P.rapidZ(hh); P.moves.push({ g: 0, x: R[0], y: R[1], z: P.z }); P.x = R[0]; P.y = R[1]; if (P.z > zTop + 0.05) P.rapidZ(zTop + 0.05); }
+        else if (mode === 'hop') { const hh = P.hopOk && !P.hopOk([P.x, P.y], R) ? P.safeZ : P.hopHeight(); if (P.z < hh) P.rapidZ(hh); P.moves.push({ g: 0, x: R[0], y: R[1], z: P.z }); P.x = R[0]; P.y = R[1]; if (P.z > zTop + 0.05) P.rapidZ(zTop + 0.05); }
         else { for (let k = 1; k < pts.length; k++) P.feed(pts[k][0], pts[k][1], dado.feed); }   // 'here': along floor the last level cleared
         // down the ramp, never faster in Z than the bit's plunge rate
         const z0 = mode === 'here' ? P.z : zTop + 0.02;
@@ -2050,7 +2252,7 @@ export function sheetToolpaths(sheet, cfg) {
     }
     return { starts, cost: total };
   };
-  const emitPocket = (pl) => { const po = planOrder(pl, pb.x == null ? home : [pb.x, pb.y]); runGroup(pl, pb, true, null, po.starts, po.order); };
+  const emitPocket = (pl) => { if (pl.done) return; pl.done = true; const po = planOrder(pl, pb.x == null ? home : [pb.x, pb.y]); runGroup(pl, pb, true, null, po.starts, po.order); pb.hopOk = null; };
   // same bit for dados and profiles: each part's dados go right before its profile
   const interleave = sameTool && plans.length > 0;
   if (plans.length && !interleave) {
@@ -2092,7 +2294,7 @@ export function sheetToolpaths(sheet, cfg) {
     const a = Math.abs(signedArea(x.g.outline));
     const tabs = tabCfg && (!(tabCfg.maxArea > 0) || a < tabCfg.maxArea) ? tabCfg : null;
     return { ...x, pi, loops: loopsFor(x), area: a, tabs, center: [(x.g.box.x0 + x.g.box.x1) / 2, (x.g.box.y0 + x.g.box.y1) / 2],
-             pockets: interleave ? plans.filter((pl) => pl.pi === pi) : [] };
+             pockets: interleave ? plans.filter((pl) => pl.pis.includes(pi)) : [] };
   });
   if (manualTabs) placeManualTabs(items, tool, tabCfg, manualTabs, warnings);
   else planSheetTabs(items, tool, sheet, warnings);
@@ -2139,10 +2341,12 @@ export function sheetToolpaths(sheet, cfg) {
       }
     }
   }
+  // a part's dados still to cut (a joined one is cut with the first of its parts)
+  const pk = (x) => x.pockets.filter((pl) => !pl.done);
   const runPart = (x, zs, note, withPockets = false, passDone = null) => {
-    if (withPockets && x.pockets.length) {
+    if (withPockets && pk(x).length) {
       // same bit: this part's dados right before its profile, no trip back across the sheet
-      for (const pl of orderShortest(x.pockets, here(), pocketEntry, pocketExit, 30)) emitPocket(pl);
+      for (const pl of orderShortest(pk(x), here(), pocketEntry, pocketExit, 30)) emitPocket(pl);
       pb.op = 'profile';
     }
     pb.comment(note ? `${x.label} ${note}` : x.label);
@@ -2165,7 +2369,7 @@ export function sheetToolpaths(sheet, cfg) {
   // a part is entered at its nearest dado end (when interleaved) or contour
   // vertex, and left where its outline starts and ends
   const partEntry = (withPockets) => (x, pos) => Math.min(nearestVertex(x.loops, pos),
-    ...(withPockets ? x.pockets.map((pl) => pocketEntry(pl, pos)) : [Infinity]));
+    ...(withPockets ? pk(x).map((pl) => pocketEntry(pl, pos)) : [Infinity]));
   const partExit = (x, pos) => startNearest(x.loops[x.loops.length - 1], pos, !x.tabs)[0];
   const byTravel = (list, withPockets = false) => orderShortest(list, here(), partEntry(withPockets), partExit);
   // Shared cut lines: where a part's cut ends depends on which neighbours were
@@ -2173,7 +2377,7 @@ export function sheetToolpaths(sheet, cfg) {
   // the nearest start of what's left to cut.
   const remainingStarts = (x, done, withPockets) => {
     const pts = [];
-    if (withPockets && x.pockets.length) for (const pl of x.pockets) pts.push(...startsOf(pl));
+    if (withPockets && pk(x).length) for (const pl of pk(x)) pts.push(...startsOf(pl));
     for (const l of x.loops.slice(0, -1)) pts.push(...l);
     const outer = x.loops[x.loops.length - 1];
     const skip = x.shared ? x.shared.filter((sp) => done.has(sp.other)) : [];
@@ -2187,13 +2391,13 @@ export function sheetToolpaths(sheet, cfg) {
   // tried for up to 6 parts, nearest-next beyond that.
   const workEntry = (x, pos, withPockets) => {
     const d = [];
-    if (withPockets) for (const pl of x.pockets) d.push(pocketEntry(pl, pos));
+    if (withPockets) for (const pl of pk(x)) d.push(pocketEntry(pl, pos));
     for (const l of x.loops.slice(0, -1)) d.push(nearestVertex([l], pos));
     return d.length ? Math.min(...d) : 0;
   };
   const workExit = (x, pos, withPockets) => {
     let cur = pos;
-    if (withPockets && x.pockets.length) for (const pl of orderShortest(x.pockets, cur, pocketEntry, pocketExit, 30)) cur = pocketExit(pl, cur);
+    if (withPockets && pk(x).length) for (const pl of orderShortest(pk(x), cur, pocketEntry, pocketExit, 30)) cur = pocketExit(pl, cur);
     const holes = x.loops.slice(0, -1);
     if (holes.length) cur = nearestOnLoop(holes[holes.length - 1], cur).p;
     return cur;
@@ -2257,8 +2461,8 @@ export function sheetToolpaths(sheet, cfg) {
       const S = st.get(x.pi);
       if (S.started) return;
       S.started = true;
-      if (withPockets && x.pockets.length) {
-        for (const pl of orderShortest(x.pockets, here(), pocketEntry, pocketExit, 30)) emitPocket(pl);
+      if (withPockets && pk(x).length) {
+        for (const pl of orderShortest(pk(x), here(), pocketEntry, pocketExit, 30)) emitPocket(pl);
         pb.op = 'profile';
       }
       pb.comment(note ? `${x.label} ${note}` : x.label);
@@ -2401,5 +2605,5 @@ export function sheetToolpaths(sheet, cfg) {
     prev = m;
   }
   const mt = machineTime(pb.moves, cfg);
-  return { moves: pb.moves, warnings, tabs: tabMarks, tabPaths, stats: { sharedLength: sharedTotal, cutLength: cutLen, rapidLength: rapidLen, estMinutes: mt.total / 60, time: mt, minX, minY, maxX, maxY, minZ } };
+  return { joins: joinCount, moves: pb.moves, warnings, tabs: tabMarks, tabPaths, stats: { sharedLength: sharedTotal, cutLength: cutLen, rapidLength: rapidLen, estMinutes: mt.total / 60, time: mt, minX, minY, maxX, maxY, minZ } };
 }

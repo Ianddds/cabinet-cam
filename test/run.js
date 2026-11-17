@@ -7,6 +7,8 @@ import { sampleKitchen, rawPart, sampleCabinetPlaces } from './synthetic.js';
 import { cabinetModel, drawerBoxes, constructionHTML } from '../public/lib/construction.js';
 import { moveRoom, applyMoves, moveKey, partKey, screwRoom } from '../public/lib/moveparts.js';
 import { parseProgram, timeline } from '../public/lib/gcodesim.js';
+import { cutLevels, cutMesh } from '../public/lib/exactcut.js';
+import { ShapeUtils, Vector2 } from '../public/lib/vendor/three/three.module.min.js';
 import { post as postFile } from '../public/lib/post.js';
 import { inRegion, difference, offset, union, area, intersect } from '../public/lib/clip.js';
 import { SHAPE_ORDERS, placeShapes, isShapePart } from '../public/lib/shapes.js';
@@ -123,11 +125,15 @@ for (const g of groupParts(parts)) {
     {
       const reach = Math.max(cfg.tool.dia, (cfg.dadoSameTool ? cfg.tool : cfg.dadoTool).dia) / 2 + 0.06;
       const regs = sheet.placements.map((pl) => offset([placedGeometry(pl).outline], reach, 'miter'));
-      let prevM = null, bad = 0;
+      let prevM = null, bad = 0, joinedSec = false;
+      const allRegs = union(regs.flat(), [], 'nonzero');
       for (const m of tp.moves) {
+        if (m.comment) { joinedSec = / \+ .* pocket /.test(m.comment); continue; }
         if (m.x == null) continue;
         if (prevM && m.g === 0 && m.z < cfg.safeZ - 1e-9 && Math.hypot(m.x - prevM.x, m.y - prevM.y) > 1e-6 && m.z > 0) {
-          const ok = regs.some((rg) => [0, 0.25, 0.5, 0.75, 1].every((t) => inRegion([prevM.x + (m.x - prevM.x) * t, prevM.y + (m.y - prevM.y) * t], rg)));
+          // (a dado joined across parts hops between those parts, over the gap between them)
+          const ok = regs.some((rg) => [0, 0.25, 0.5, 0.75, 1].every((t) => inRegion([prevM.x + (m.x - prevM.x) * t, prevM.y + (m.y - prevM.y) * t], rg)))
+            || (joinedSec && [0, 0.25, 0.5, 0.75, 1].every((t) => inRegion([prevM.x + (m.x - prevM.x) * t, prevM.y + (m.y - prevM.y) * t], allRegs)));
           if (!ok) bad++;
         }
         prevM = m;
@@ -732,9 +738,13 @@ for (const g of groupParts(parts)) {
                 if (!gg.pockets.some((f) => f.depth >= -cz - 1e-4 && inRegion(q, f.loops))) tooDeep++;
               }
             }
+            // (per area: a dado taken down by itself finishes its walls before the next one is cleared)
             const zk = m.z.toFixed(4);
-            if (m.op === 'finish') finAt.add(zk);
-            if (m.op === 'pocket' && !m.ramp && finAt.has(zk) && Math.hypot(m.x - prevM.x, m.y - prevM.y) > 0.3) badFin++;
+            if (m.op === 'finish') finAt.add([zk, m.x, m.y]);
+            if (m.op === 'pocket' && !m.ramp && Math.hypot(m.x - prevM.x, m.y - prevM.y) > 0.3) {
+              const mid = [(m.x + prevM.x) / 2, (m.y + prevM.y) / 2];
+              if ([...finAt].some(([z, x, y]) => z === zk && Math.hypot(x - mid[0], y - mid[1]) < Math.hypot(m.x - prevM.x, m.y - prevM.y) / 2 + 1)) badFin++;
+            }
           }
           prevM = m;
         }
@@ -814,13 +824,15 @@ for (const g of groupParts(parts)) {
         sh.placements.forEach((pl, k) => {
           const name = pl.label || pl.part.name;
           const gq = placedGeometry(pl);
-          if (!comments.some((c) => c === name || c.startsWith(name + ' '))) missingWork++;
-          if (gq.pockets.length && !comments.some((c) => c.startsWith(name + ' pocket'))) missingWork++;
+          // (a dado joined across parts is labelled "A + B pocket ...")
+          const pocketOf = (c) => / pocket /.test(c) && c.split(' pocket ')[0].split(' + ').includes(name);
+          if (!comments.some((c) => c === name || c.startsWith(name + ' ') || pocketOf(c))) missingWork++;
+          if (gq.pockets.length && !comments.some((c) => c.startsWith(name + ' pocket') || pocketOf(c))) missingWork++;
           // the first cut along this part's outline comes after its own work started
           const loop = offset([gq.outline], r, 'miter').sort((a, b) => area([b]) - area([a]))[0];
           const firstOutline = tp.moves.findIndex((m, i) => i > 0 && m.g === 1 && m.z < 0 && (m.op === 'profile' || m.op === 'tab') && tp.moves[i - 1].x != null &&
             loop.some((q, j) => segD([(m.x + tp.moves[i - 1].x) / 2, (m.y + tp.moves[i - 1].y) / 2], q, loop[(j + 1) % loop.length]) < 0.003));
-          const ownStart = tp.moves.findIndex((m) => m.comment && (m.comment === name || m.comment.startsWith(name + ' ')));
+          const ownStart = tp.moves.findIndex((m) => m.comment && (m.comment === name || m.comment.startsWith(name + ' ') || pocketOf(m.comment)));
           if (firstOutline >= 0 && ownStart > firstOutline) outlineEarly++;
         });
         // no outline move cuts into any part
@@ -1351,7 +1363,9 @@ for (const g of groupParts(parts)) {
   // bit goes from the shallow pocket to the deep one inside the operation).
   // 2026-11-10 (4): +15% on purpose: pocket wall passes climb-cut (the default;
   // 'either' direction is ~1.7 min faster on this job, back near 2146 / 2538).
-  const RAPID_BASELINE = { 0: 2480, 0.02: 2890 };
+  // 2026-11-16: lowered (-12% / -10%): dados and rabbets that run from one part
+  // into a lined-up one beside it are cut as one pass across the gap.
+  const RAPID_BASELINE = { 0: 2180, 0.02: 2615 };
   const many = normalizeAll(sampleKitchen()).parts;
   many.forEach((p) => { p.include = p.cnc !== false; p.qty = (p.qty || 1) * 3; });
   for (const onion of [0, 0.02]) {
@@ -1577,6 +1591,119 @@ function distSeg(p, a, b) {
   const vx = b[0] - a[0], vy = b[1] - a[1], L2 = vx * vx + vy * vy;
   const t = L2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / L2)) : 0;
   return Math.hypot(a[0] + t * vx - p[0], a[1] + t * vy - p[1]);
+}
+
+// ---------- dados joined across parts: a dado that runs out of one part into a lined-up one in the next is one pass ----------
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  s0.holdDown = 'tabs';
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const T = 0.75, W = 30, H = 20, gap = tl.tool.dia;   // common line: the parts the bit apart
+  const rect = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  const panel = (id, y0) => ({ id, name: id, include: true, qty: 1, grain: 'none', thickness: T, width: W, height: H, outline: rect(0, 0, W, H), holes: [],
+    pockets: [{ loops: [rect(0, y0, W, y0 + 0.75)], depth: 0.25, x0: 0, y0, x1: W, y1: y0 + 0.75 }], material: 'T', custom: false });
+  const sheetOf = (yB) => ({ w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], placements: [
+    { part: panel('PA', 10), copy: 1, x: 2, y: 2, rotated: false }, { part: panel('PB', yB), copy: 1, x: 2 + W + gap, y: 2, rotated: false }] });
+  const cfgJ = { ...s0, ...tl, thickness: T };
+  const run = (yB, join = true) => { const sh = sheetOf(yB); return { sh, tp: sheetToolpaths(sh, { ...cfgJ, joinDados: join }) }; };
+  const pocketLifts = (tp) => {
+    let on = false, n = 0, prev = null;
+    for (const m of tp.moves) {
+      if (m.comment) { on = / pocket /.test(m.comment); prev = null; continue; }
+      if (!on || m.x == null) continue;
+      if (prev && m.g === 0 && m.z > 0 && Math.hypot(m.x - prev.x, m.y - prev.y) > 1) n++;
+      prev = m;
+    }
+    return n;
+  };
+  const crosses = (tp) => { let prev = null; return tp.moves.some((m) => { const ok = prev && m.g === 1 && m.z < -0.2 && Math.min(prev.x, m.x) < 2 + W - 0.1 && Math.max(prev.x, m.x) > 2 + W + gap + 0.1; if (m.x != null) prev = m; return ok; }); };
+  const joined = (tp) => tp.moves.some((m) => m.comment && / \+ .* pocket /.test(m.comment));
+  const a = run(10), off = run(10, false);
+  check(joined(a.tp) && crosses(a.tp), 'lined-up dados in two parts are one pass, cut straight through the gap');
+  check(a.tp.stats.estMinutes < off.tp.stats.estMinutes, `joined dados are quicker (${a.tp.stats.estMinutes.toFixed(3)} vs ${off.tp.stats.estMinutes.toFixed(3)} min)`);
+  // a short jog: joined, it's one pass with no lifts (kept only when it's quicker)
+  const jogSh = sheetOf(10.3), jogTp = sheetToolpaths(jogSh, { ...cfgJ, joinDados: 'all' });
+  const jog = { sh: jogSh, tp: jogTp };
+  check(joined(jog.tp) && pocketLifts(jog.tp) === 0, `dados a short jog apart can be joined: one pass, no lifts (${pocketLifts(jog.tp)})`);
+  const pick = run(10.3).tp, pickOff = run(10.3, false).tp;
+  check(pick.stats.estMinutes <= Math.min(jog.tp.stats.estMinutes, pickOff.stats.estMinutes) + 1e-6, 'joined or not, whichever is quicker is kept');
+  check(!joined(run(12).tp), 'dados far apart sideways are not joined');
+  for (const [nm, r] of [['lined up', a], ['jog', jog]]) {
+    const res = simCheck(r.sh, carve(r.sh, r.tp.moves, { res: 0.03, dia: tl.tool.dia }), { dia: tl.dadoTool.dia, profileDia: tl.tool.dia, thickness: T, holdDown: 'tabs' });
+    check(res.ok, `joined dados (${nm}) cut clean (${res.uncut} uncut, ${res.deep} deep)`);
+  }
+}
+
+// ---------- the exact cut (run simulator): true shapes from the moves ----------
+{
+  const r = 0.1875, opts = { zTop: 0, floorZ: -0.75, W: 30, H: 24 };
+  const tri = (o, hs) => ShapeUtils.triangulateShape(o.map(([x, y]) => new Vector2(x, y)), hs.map((h) => h.map(([x, y]) => new Vector2(x, y))));
+  const moves = [
+    // a 3/4" dado, 0.25 deep: middle row and two wall passes
+    { a: [4.375, -0.3, -0.25], b: [4.375, 23, -0.25], r }, { a: [4.1875, 23, -0.25], b: [4.1875, -0.3, -0.25], r }, { a: [4.5625, -0.3, -0.25], b: [4.5625, 23, -0.25], r },
+    { a: [10, 10, 0.1], b: [10, 10, -0.5], r: 0.0984 },          // a 5 mm hole 0.5 deep
+    { a: [15, 2, -0.8], b: [25, 2, -0.8], r },                   // a cut right through (overcut into the spoilboard)
+    { a: [20, 5, 0], b: [21, 5, -0.2], r },                      // a ramp
+    { a: [0, 30, 0.5], b: [20, 30, 0.5], r },                    // a rapid above the sheet
+  ];
+  const { levels } = cutLevels(moves, opts);
+  const pts = (z) => levels.find((l) => Math.abs(l.z - z) < 1e-6)?.paths.flat().map((q) => [q.X / 1e5, q.Y / 1e5]) || [];
+  const dado = pts(-0.25).filter(([x]) => x < 6);
+  check(Math.abs(Math.min(...dado.map((p) => p[0])) - 4.0) < 1e-4 && Math.abs(Math.max(...dado.map((p) => p[0])) - 4.75) < 1e-4, 'exact cut: a 3/4" dado\'s walls are where the bit put them (to 0.0001")');
+  const hole = pts(-0.5).map(([x, y]) => Math.hypot(x - 10, y - 10)).filter((d) => d < 1);
+  check(hole.length > 30 && Math.max(...hole) - 0.0984 < 2e-4 && 0.0984 - Math.min(...hole) < 2e-4, `exact cut: a drilled hole is round (${hole.length} points, radius ${Math.min(...hole).toFixed(4)}-${Math.max(...hole).toFixed(4)})`);
+  check(levels.some((l) => Math.abs(l.z + 0.75) < 1e-6) && !levels.some((l) => l.z < -0.75 - 1e-6), 'exact cut: a cut past the bottom stops at the bottom of the sheet');
+  const ramp = levels.filter((l) => l.z > -0.2 - 1e-6 && l.z < 0);
+  check(ramp.length >= 15, `exact cut: a ramp is cut in thin slices (${ramp.length})`);
+  const m = cutMesh(moves, { ...opts, triangulate: tri });
+  let walls = 0, badN = 0;
+  for (let i = 0; i < m.kind.length; i++) {
+    const nl = Math.hypot(m.normal[3 * i], m.normal[3 * i + 1], m.normal[3 * i + 2]);
+    if (Math.abs(nl - 1) > 1e-3) badN++;
+    if (m.kind[i] === 1) { walls++; if (Math.abs(m.normal[3 * i + 2]) > 1e-6) badN++; }
+  }
+  check(m.position.length > 0 && walls > 0 && badN === 0 && m.position.length % 9 === 0, `exact cut: a mesh of triangles, walls straight up and down (${m.position.length / 3} points)`);
+  // the top face is the sheet less what was cut
+  let topA = 0;
+  for (let i = 0; i < m.kind.length; i += 3) if (m.kind[i] === 0) {
+    const a = [m.position[3 * i], m.position[3 * i + 1]], b = [m.position[3 * i + 3], m.position[3 * i + 4]], c = [m.position[3 * i + 6], m.position[3 * i + 7]];
+    topA += Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2;
+  }
+  const cutA = levels[levels.length - 1].paths.reduce((s2, p) => s2 + ClipperLib.Clipper.Area(p), 0) / 1e10;
+  check(Math.abs(topA + cutA - 30 * 24) < 0.01, `exact cut: top face + cut area = the sheet (${(topA + cutA).toFixed(3)} sq in)`);
+  // a real sheet's program
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const grp = groupParts(normalizeAll(sampleKitchen()).parts.filter((p) => p.cnc !== false))[0];
+  const sh = nestParts(grp.parts, { ...s0.sheet, respectGrain: true }).sheets[0];
+  const tp = sheetToolpaths(sh, { ...s0, ...tl, thickness: grp.thickness });
+  const seg = [];
+  let prev = null;
+  for (const mv of tp.moves) { if (mv.x == null) continue; if (prev) seg.push({ a: [prev.x, prev.y, prev.z], b: [mv.x, mv.y, mv.z], r: tl.tool.dia / 2 }); prev = mv; }
+  const t0 = Date.now();
+  const big = cutMesh(seg, { zTop: 0, floorZ: -grp.thickness, W: 96, H: 48, triangulate: tri });
+  const ms = Date.now() - t0;
+  check(big.levels.length > 2 && ms < 20000, `exact cut of a full sheet: ${big.levels.length} depths, ${(big.position.length / 3 / 1000).toFixed(0)}k points, ${ms} ms`);
+  console.log(`exact cut: a full sheet in ${ms} ms, ${(big.position.length / 3 / 1000).toFixed(0)}k points`);
+}
+
+// ---------- a side: bottom dado and top rabbet both running into a back slot ----------
+// rows spaced across each dado's own width (was two rows plus the walls, ending
+// at the wrong end: 61" of travel)
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const rect = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  const L = 34.5, D = 23.25;
+  const pockets = [{ loops: [rect(4.0, 0, 4.75, D - 0.75)], depth: 0.25 }, { loops: [rect(L - 0.75, 0, L, D - 0.75)], depth: 0.375 }, { loops: [rect(0, D - 1.0, L, D - 0.5)], depth: 0.3125 }];
+  const part = { id: 'S', name: 'SIDE', include: true, qty: 1, grain: 'none', thickness: 0.75, width: L, height: D, outline: rect(0, 0, L, D), holes: [], pockets, material: 'T', custom: false };
+  const sheet = { w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], placements: [{ part, copy: 1, x: 2, y: 2, rotated: false }] };
+  const tp = sheetToolpaths(sheet, { ...s0, ...tl, thickness: 0.75 });
+  let travel = 0, prev = null;
+  for (const m of tp.moves) { if (m.x == null) continue; if (m.op === 'profile') break; if (prev && m.g === 0) travel += Math.hypot(m.x - prev.x, m.y - prev.y); prev = m; }
+  check(travel < 50, `side with a back slot: ${travel.toFixed(0)}" of travel in its dados (was 61")`);
+  const res = simCheck(sheet, carve(sheet, tp.moves, { res: 0.03, dia: tl.tool.dia }), { dia: tl.dadoTool.dia, profileDia: tl.tool.dia, thickness: 0.75, holdDown: s0.holdDown });
+  check(res.ok, `side with a back slot cuts clean (${res.uncut} uncut, ${res.deep} deep)`);
 }
 
 // ---------- a drawer side's pocket: one end's rabbet, the groove, the other end, without crossing back and forth ----------

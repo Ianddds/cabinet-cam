@@ -238,6 +238,8 @@ tr.group .caret { display: inline-block; width: 1em; }
 .rs-dro b { font: 600 26px ui-monospace, Consolas, monospace; color: #7ee787; }
 .rs-info div { margin: 2px 0; }
 .rs-state { font-weight: 600; color: #f2cc60; }
+.rs-probe { margin-top: 4px; color: #cfe3ff; min-height: 1.2em; }
+.rs-probe b { color: #fff; }
 .rs-msg { background: #5a4410; border: 1px solid #a07c1e; border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .rs-code { flex: 1; overflow: hidden; margin: 0; background: #111418; border-radius: 6px; padding: 6px 0; font: 12px/1.5 ui-monospace, Consolas, monospace; }
 .rs-code div { padding: 0 8px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
