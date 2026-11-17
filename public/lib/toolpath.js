@@ -42,12 +42,20 @@ class PathBuilder {
     this.z = this.safeZ;
   }
   // Plunge with the loaded tool: entry ipm down to the entry depth, then plunge/drill ipm.
-  plunge(z) {
+  // top: where the material starts here. Below the sheet top (a stepdown into
+  // floor an earlier level already cut) there's no face to enter: rapid down to
+  // just above that floor and plunge the rest at plunge ipm, no slow entry.
+  plunge(z, top = 0) {
     const t = this.tool || {};
     const df = t.drillFeed || t.plunge || 30;
     const ef = t.entryFeed || df;
     const ez = -(t.entryDepth || 0);
     const push = (zz, f) => { this.moves.push({ g: 1, x: this.x, y: this.y, z: zz, f, plunge: true, op: this.op }); this.z = zz; };
+    if (top < -1e-9 && z < top + 1e-9) {
+      if (this.z > top + 0.02 + 1e-9) this.rapidZ(top + 0.02);
+      if (z < this.z - 1e-9) push(z, df);
+      return;
+    }
     if (this.z > ez + 1e-9 && z < ez - 1e-9) {
       push(ez, ef);
       push(z, df);
@@ -65,12 +73,12 @@ class PathBuilder {
     this.x = x; this.y = y; this.z = z;
   }
   // Go to (x,y,z): rapid when up, otherwise feed at depth if already there.
-  startAt(x, y, z, low = false) {
+  startAt(x, y, z, low = false, top = 0) {
     const here = this.x !== null && Math.abs(this.x - x) < 1e-6 && Math.abs(this.y - y) < 1e-6;
     if (!here) this.rapidTo(x, y, low);
     else if (this.z < z - 1e-9) this.rapidZ(z); // already in the cut but deeper than this op wants
     if (this.z > 0.05) this.rapidZ(0.05); // rapid down to just above the surface
-    if (z < this.z) this.plunge(z);
+    if (z < this.z) this.plunge(z, top);
   }
   // Short move inside one pocket: lift just clear of the material top, move
   // over at that height, plunge. Never drags the tool sideways through stock.
@@ -80,14 +88,14 @@ class PathBuilder {
     const h = this.hopZ ?? 0.1;
     return h > 0 ? Math.min(Math.max(h, 0.05), this.safeZ) : this.safeZ;
   }
-  hopTo(x, y, z) {
+  hopTo(x, y, z, top = 0) {
     // (hopOk: when set, a hop it turns down goes up to safe Z instead)
     const clear = this.hopOk && this.x != null && !this.hopOk([this.x, this.y], [x, y]) ? this.safeZ : this.hopHeight();
-    if (this.x == null) { this.startAt(x, y, z); return; }
+    if (this.x == null) { this.startAt(x, y, z, false, top); return; }
     if (this.z < clear) this.rapidZ(clear);
     this.moves.push({ g: 0, x, y, z: this.z });
     this.x = x; this.y = y;
-    if (z < this.z) this.plunge(z);
+    if (z < this.z) this.plunge(z, top);
   }
   toolchange(tool, note) {
     if (this.z < this.safeZ) this.retract();
@@ -2041,22 +2049,22 @@ function sheetPlan(sheet, cfg, joinSkip) {
       };
       const goTo = (x, y, ahead = []) => {
         if (first) {
-          if (!rampTo(x, y, ahead, 'start')) P.startAt(x, y, L.z, real ? lowTo(pl.pi)([x, y]) : false);
+          if (!rampTo(x, y, ahead, 'start')) P.startAt(x, y, L.z, real ? lowTo(pl.pi)([x, y]) : false, L.zTop);
           first = false; if (real) curPart = pl.pi; return;
         }
         const here = posNow();
-        if (dist(here, [x, y]) < 1e-6) { if (P.z > L.z + 1e-9 && !rampTo(x, y, ahead, 'here')) P.plunge(L.z); return; }
+        if (dist(here, [x, y]) < 1e-6) { if (P.z > L.z + 1e-9 && !rampTo(x, y, ahead, 'here')) P.plunge(L.z, L.zTop); return; }
         if (P.z > L.z + 1e-9 && prevL) {
           // new, deeper level: back over the last level's cleared floor, then down
           const n = Math.max(4, Math.ceil(dist(here, [x, y]) / 0.02));
           let ok = dist(here, [x, y]) <= maxCleared;
           for (let k = 0; k <= n && ok; k++) { const p = [here[0] + ((x - here[0]) * k) / n, here[1] + ((y - here[1]) * k) / n]; ok = inOrOn(p, prevL.allowed) && (clearedIn(prevCut, p) || dist(p, here) <= rD || dist(p, [x, y]) <= rD); }
-          if (ok) { P.feed(x, y, dado.feed); if (!rampTo(x, y, ahead, 'here')) P.plunge(L.z); return; }
-          if (!rampTo(x, y, ahead, 'hop')) P.hopTo(x, y, L.z);
+          if (ok) { P.feed(x, y, dado.feed); if (!rampTo(x, y, ahead, 'here')) P.plunge(L.z, L.zTop); return; }
+          if (!rampTo(x, y, ahead, 'hop')) P.hopTo(x, y, L.z, L.zTop);
           return;
         }
         if (stayDown(here, [x, y])) feedTo(x, y);
-        else if (!rampTo(x, y, ahead, 'hop')) P.hopTo(x, y, L.z);
+        else if (!rampTo(x, y, ahead, 'hop')) P.hopTo(x, y, L.z, L.zTop);
       };
       const runPath = (path, base) => {
         P.op = base;
@@ -2065,7 +2073,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
         goTo(path[0][0], path[0][1], ahead);
         for (let k = 1; k < path.length; k++) {
           const [x, y, tag] = path[k];
-          if (tag === 'hop') { P.hopTo(x, y, L.z); continue; }
+          if (tag === 'hop') { P.hopTo(x, y, L.z, L.zTop); continue; }
           P.op = tag === 'relief' ? 'relief' : base;
           feedTo(x, y);
         }

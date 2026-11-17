@@ -216,6 +216,10 @@
           <span class="split-btn"><button id="saveFilesBtn" class="primary"></button><button id="saveFilesMore" class="primary more" title="This sheet only, download instead, the G-code folder">▾</button></span>
           <button id="markCut" class="mark-cut">Mark as cut…</button>
         </div>
+        <div id="staleBar" class="stale-bar" hidden>
+          <span>Parts or settings changed since these sheets were made. They aren't updated until you say so (big jobs take a while).</span>
+          <button id="updateSheets" class="primary">Update sheets</button>
+        </div>
         <div id="outFolder" class="small out-folder" hidden></div>
         <div id="sheetTabs" class="tabs"></div>
         <div id="labelsPanel" class="labels-panel" hidden>

@@ -41,6 +41,7 @@ Click **load the sample job** (in the empty parts list, or **Help → Load the s
 - **Left column:** Source (Part Studio URL, Get parts), then the settings cards: Sheet, Remnants, Tools, Cutting (with Hold parts with), Machine.
 - **Parts:** the list, cabinet filter, and one **Nest & toolpath** button in a bar pinned to the bottom of the card while the list scrolls.
 - **Sheets header:** **Try another nest** · **Print ▾** (sheet layouts, this sheet's layout, construction sheets, labels, cut list) · **Save all to folder** / **Download all** with **▾** (this sheet only, download instead, the G-code folder) · **Mark as cut…**
+- **Changes wait for Update sheets.** Once a job is nested, changing parts (counts, ticks, grain, the cabinet filter), tools or settings doesn't re-nest or re-plan anything: a yellow bar on the Sheets card says the sheets are out of date, with **Update sheets** (same as **Nest & toolpath**: it searches only materials whose parts changed, and just re-plans the toolpaths otherwise). Until then Save, Print and Mark as cut are greyed out, so nothing out of date gets cut or printed. Big jobs no longer lag on every edit.
 - **Each sheet:** **3D simulation** at the right of its title; the mode switch **View · Move parts · Tabs · Screws** (one at a time; the mode's help and its reset buttons show under it); **Show:** Toolpaths · Check cut.
 - **Desktop Help menu:** check for updates, load the sample job, save raw Onshape data (troubleshooting), about.
 
@@ -87,7 +88,7 @@ The **tool library** (Tools → Edit tool library…) holds every bit's defaults
 
 Each job picks a profile tool, a dado tool (or "same as profile") and which tools may drill holes. Saving a job stores a copy of the tools it used, so an old job regenerates the same code after the library is retuned (or a tool is deleted).
 
-Every plunge into material — profiles, dados and drilling — runs at the plunge entry ipm down to the plunge entry depth, then at the plunge ipm (after entry). The tool rapids down to 0.05" above the surface before feeding.
+Every plunge into the sheet's face — profiles, dados and drilling — runs at the plunge entry ipm down to the plunge entry depth, then at the plunge ipm (after entry). The tool rapids down to 0.05" above the surface before feeding. A stepdown into floor an earlier level of the same pocket already cleared has no face to enter: the tool rapids down to 0.02" above that floor and plunges the rest at the plunge ipm, with no slow entry.
 
 **Machine profile** (Machine card): max X/Y and Z feed (ipm), X/Y and Z acceleration (in/s²) and how long a manual bit change takes. Take them from the controller (FluidNC: `max_rate_mm_per_min` and `acceleration_mm_per_sec2` per axis, ÷ 25.4). Rapids run at the max speeds (ShopBot jog speeds come from them too). Times are worked out the way the controller moves: every move capped by its feed and each axis's top speed, speeding up and slowing down at the acceleration, slowing at a corner only as much as its angle needs (junction deviation), plus bit changes and spindle spin-up. That time is what the summary shows and what every choice of cutting order is judged by.
 

@@ -1785,6 +1785,50 @@ function distSeg(p, a, b) {
   check(constructionHTML([], {}) === null, 'nothing to draw: null');
 }
 
+// ---------- slow plunge entry only into the sheet's face ----------
+// A stepdown into floor an earlier level already cut has no face to enter: no
+// entry-ipm plunge there, and the rapid down stops just above that floor.
+{
+  const many = normalizeAll(sampleKitchen()).parts.filter((p) => p.cnc !== false);
+  const s = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s, DEFAULT_LIBRARY, []);
+  for (const k of Object.keys(tl)) if (tl[k] && tl[k].stepdown) tl[k] = { ...tl[k], stepdown: 0.1 };
+  const segD = (p, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy; const t = L2 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2)) : 0; return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); };
+  let slowInCut = 0, steps = 0, rapidsDown = 0, intoStock = 0;
+  for (const g of groupParts(many.map((p) => ({ ...p, include: true })))) {
+    for (const sh of nestParts(g.parts, { ...s.sheet, respectGrain: true }).sheets) {
+      const tp = sheetToolpaths(sh, { ...s, ...tl, thickness: g.thickness });
+      let tool = null, prev = null;
+      const cut = [];
+      for (const m of tp.moves) {
+        if (m.toolchange) { tool = m.tool; continue; }
+        if (m.x == null) continue;
+        const R = tool ? tool.dia / 2 : 0.125;
+        // how deep the cut is at p so far (0 = uncut); footprint: the bit's circle
+        const cutTo = (p) => cut.reduce((d, c) => (c.z < d && segD(p, c.a, c.b) <= c.r + 1e-4 ? c.z : d), 0);
+        const ring = (x, y) => [[x, y], ...[...Array(12)].map((_, k) => [x + Math.cos(k * Math.PI / 6) * (R - 0.01), y + Math.sin(k * Math.PI / 6) * (R - 0.01)])];
+        const footTo = (x, y) => Math.max(...ring(x, y).map(cutTo));
+        // a plunge from above the sheet with the slow entry, where the whole footprint is already cut
+        if (m.plunge && (m.op === 'pocket' || m.op === 'finish') && prev && prev.z > -1e-6 && footTo(m.x, m.y) < -0.07) slowInCut++;
+        if (m.plunge && prev && prev.z < -1e-6 && prev.g === 0) steps++;
+        if (m.g === 0 && m.z < -1e-6 && prev && prev.z > m.z + 1e-6) {
+          rapidsDown++;
+          if (footTo(m.x, m.y) > m.z + 1e-6) intoStock++;
+        }
+        // a straight-down move cuts its circle to its bottom; a sideways one, conservatively, at its top
+        if (prev && m.g === 1) {
+          const vert = Math.abs(prev.x - m.x) < 1e-9 && Math.abs(prev.y - m.y) < 1e-9;
+          cut.push({ a: [prev.x, prev.y], b: [m.x, m.y], z: vert ? m.z : Math.max(prev.z, m.z), r: R });
+        }
+        prev = m;
+      }
+    }
+  }
+  check(slowInCut === 0, `stepdowns into cleared floor plunge without the slow entry (${slowInCut} still slow)`);
+  check(rapidsDown > 10 && steps > 10, `stepdowns rapid down into the cleared floor (${rapidsDown} rapids down, ${steps} plunges from there)`);
+  check(intoStock === 0, `no rapid goes down into uncut stock (${intoStock})`);
+}
+
 console.log(`\npocket lifts after first entry: ${liftTotal} across ${pocketTotal} pockets`);
 check(arcTotal > 20, `G-code uses arcs (${arcTotal} G2/G3 in the sample job)`);
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');

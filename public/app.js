@@ -27,6 +27,22 @@ function rememberSettings() {
 
 let job = { id: null, name: '', source: null, parts: [], settings: loadSavedSettings() };
 let results = []; // [{ group, sheets: [{ sheet, tp, file, text }] , unplaced }]
+// Parts, tools or settings changed since the sheets were made: they wait for
+// Update sheets instead of re-nesting / re-planning every sheet on each change.
+let stale = false;
+function markStale() {
+  if (!results.length) return;
+  stale = true;
+  showStale();
+}
+function showStale() {
+  $('#staleBar').hidden = !stale;
+  // files, layouts and labels from out-of-date sheets would be wrong
+  const off = stale || !!results.pendingShapes;
+  for (const id of ['#saveFilesBtn', '#saveFilesMore']) $(id).disabled = off;
+  $('#printMenuBtn').disabled = stale;
+  $('#markCut').disabled = (stale || !!results.pendingShapes) && !job.cut;
+}
 let activeSheet = 0;
 let moveEdit = false;   // sheet view: drag parts by hand (they snap to the nearest spot that fits)
 let screwEdit = false;
@@ -177,7 +193,7 @@ function renderCabFilter() {
 function setOffCabinets(list) {
   job.offCabinets = list;
   renderParts();
-  if (results.length) runNest();
+  markStale();
 }
 $('#cabFilter').addEventListener('change', (e) => {
   const c = e.target.dataset.cab;
@@ -295,7 +311,7 @@ $('#partsTable').addEventListener('change', (e) => {
   if (k === 'qty') p.qty = Math.max(0, parseInt(e.target.value, 10) || 0);
   if (k === 'grain') p.grainOverride = e.target.value;
   renderParts();
-  if (results.length) runNest();
+  markStale();
 });
 $('#partsTable').addEventListener('click', (e) => {
   const gr = e.target.closest('tr.group[data-g]');
@@ -352,7 +368,7 @@ function saveLibrary() {
     } catch (e) { $('#librarySaved').textContent = `Not saved: ${e.message}`; }
   }, 400);
   renderToolPickers();
-  if (results.length) runNest();
+  markStale();
 }
 
 $('#libraryList').addEventListener('change', (e) => {
@@ -388,7 +404,7 @@ $('#holeTools').addEventListener('change', (e) => {
   if (e.target.checked) ids.add(id); else ids.delete(id);
   job.settings.holeToolIds = library.map((t) => t.id).filter((x) => ids.has(x));
   rememberSettings();
-  if (results.length) runNest();
+  markStale();
 });
 
 function renderSettings() {
@@ -418,7 +434,7 @@ document.querySelector('.side').addEventListener('change', (e) => {
   setPath(job.settings, el.dataset.path, v);
   rememberSettings();
   renderSettings();
-  if (results.length) runNest(); // keep previews in step with settings
+  markStale(); // the sheets wait for Update sheets (re-planning a big job on every change lags)
 });
 
 // label settings only change the labels
@@ -550,7 +566,7 @@ function shapesFor(nest, g, nestOpts) {
         const win = good.reduce((b, a) => (!b || better(a.spots.cost, b.spots.cost) || (!better(b.spots.cost, a.spots.cost) && a.spots.pass < b.spots.pass) ? a : b), null);
         shapeMemo.set(key, win ? { spots: win.spots } : { error: err?.error || 'no answer' });
         if (shapeMemo.size > 40) shapeMemo.delete(shapeMemo.keys().next().value);
-        if (results.length) runNest();   // lay the sheets out again, now with the shapes
+        if (results.length) runNest();   // lay the sheets out again, now with the shapes (and any changes waiting)
       };
       wk.onerror = (e) => { wk.onmessage({ data: { id, error: e.message || 'shape worker failed' } }); };
       return { wk, passes };
@@ -630,6 +646,7 @@ async function searchNests(force = false) {
 }
 
 function runNest() {
+  stale = false;
   const s = job.settings;
   const tl = resolveTools(s, library, job.toolSnapshot || []);
   const problems = settingsProblems(s, tl);
@@ -762,9 +779,8 @@ function renderResults() {
     (keepN ? ` · ${keepN} offcut${keepN === 1 ? '' : 's'} to keep` : '') +
     (results.quick ? ' · quick nest: click Nest & toolpath to search for a better one' : '');
   renderCutState();
-  // custom shapes still being fitted: nothing to download or mark cut yet
-  $('#saveFilesBtn').disabled = $('#saveFilesMore').disabled = !!results.pendingShapes;
-  $('#markCut').disabled = !!results.pendingShapes && !job.cut;
+  // custom shapes still being fitted, or changes waiting: nothing to download or mark cut yet
+  showStale();
   $('#sheetTabs').innerHTML = all.map((x, i) => {
     const n = results.find((r) => r.sheets.includes(x));
     const fulls = n.sheets.filter((y) => !y.sheet.remnant);
@@ -1811,6 +1827,7 @@ window.cabinetCam = {
 };
 $('#nestBtn').onclick = async () => { activeSheet = 0; await searchNests(false); $('#resultsCard').scrollIntoView({ behavior: 'smooth' }); };
 $('#searchAgain').onclick = () => searchNests(true);
+$('#updateSheets').onclick = () => searchNests(false);
 $('#jobName').addEventListener('input', (e) => { job.name = e.target.value; });
 
 $('#saveJob').onclick = (e) => busy(e.target, async () => {
@@ -1885,7 +1902,7 @@ $('#postFile').onchange = async (e) => {
     rememberSettings();
     renderSettings();
     showMessages([{ text: `Post "${r.name}" added (${r.file}) and selected.`, items: r.warnings }]);
-    if (results.length) runNest();
+    markStale();
   } catch (err) { showMessages([{ error: true, text: err.message }]); }
 };
 $('#postRemove').onclick = async () => {
@@ -1895,6 +1912,7 @@ $('#postRemove').onclick = async () => {
   job.settings.post = 'fluidnc';
   rememberSettings();
   await loadPosts();
+  markStale();
 };
 
 async function loadLibrary() {
