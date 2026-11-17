@@ -40,6 +40,7 @@ export function openRunSim(opts) {
       <label class="small"><input type="checkbox" id="rsMat" checked> Material</label>
       <label class="small"><input type="checkbox" id="rsPath" checked> Path</label>
       <label class="small" title="Draw the path over the material instead of down in the cuts"><input type="checkbox" id="rsOnTop"> Path on top</label>
+      <label class="small" title="Band the cut walls by the plies of the sheet (off: plain walls)"><input type="checkbox" id="rsPlies"> Plies</label>
       <label class="small" title="How fine the material is: finer shows sharper cuts but needs a stronger graphics card">Detail <select id="rsQual"><option value="ultra">Ultra</option><option value="fine">Fine</option><option value="normal">Normal</option><option value="fast">Fast</option></select></label>
       <button id="rsClose">Close</button>
     </div>
@@ -136,44 +137,57 @@ export function openRunSim(opts) {
   const surfMat = new THREE.ShaderMaterial({
     uniforms: {
       hmap: { value: tex }, res: { value: res }, gsize: { value: new THREE.Vector2(gw, gh) },
-      zTop: { value: zTop }, floorZ: { value: floorZ }, plyT: { value: thick / plies },
+      zTop: { value: zTop }, floorZ: { value: floorZ }, plyT: { value: thick / plies }, plyOn: { value: 0 },
       sun: { value: new THREE.Vector3(0.35, -0.55, 0.76).normalize() },
     },
+    // The grid's triangles only carry the shape; every pixel is coloured and lit
+    // from a smooth reading of the heights at that exact spot (between grid
+    // points), so the edge of a cut follows the real curve at pixel level.
     vertexShader: `
       uniform sampler2D hmap; uniform float res; uniform vec2 gsize; uniform float floorZ;
-      varying vec3 vN; varying float vZ; varying float vSlope;
+      varying vec2 vXY;
       float h(ivec2 c) { c = clamp(c, ivec2(0), ivec2(gsize) - 1); return max(texelFetch(hmap, c, 0).r, floorZ); }
       void main() {
         vec4 wp = modelMatrix * vec4(position.xy, 0.0, 1.0);
         // points past the sheet's edge fold back onto it (their triangles vanish)
         ivec2 c = min(ivec2(floor(wp.xy / res)), ivec2(gsize) - 1);
         vec2 xy = (vec2(c) + 0.5) * res;
-        float z = h(c);
-        float dx = (h(c + ivec2(1, 0)) - h(c - ivec2(1, 0))) / (2.0 * res);
-        float dy = (h(c + ivec2(0, 1)) - h(c - ivec2(0, 1))) / (2.0 * res);
-        vN = normalize(vec3(-dx, -dy, 1.0));
-        vSlope = 1.0 - vN.z;
-        vZ = z;
-        gl_Position = projectionMatrix * viewMatrix * vec4(xy, z, 1.0);
+        vXY = xy;
+        gl_Position = projectionMatrix * viewMatrix * vec4(xy, h(c), 1.0);
       }`,
     fragmentShader: `
-      uniform float zTop; uniform float floorZ; uniform float plyT; uniform vec3 sun;
-      varying vec3 vN; varying float vZ; varying float vSlope;
+      uniform sampler2D hmap; uniform float res; uniform vec2 gsize;
+      uniform float zTop; uniform float floorZ; uniform float plyT; uniform float plyOn; uniform vec3 sun;
+      varying vec2 vXY;
+      float h(ivec2 c) { c = clamp(c, ivec2(0), ivec2(gsize) - 1); return max(texelFetch(hmap, c, 0).r, floorZ); }
+      // the height between grid points (bilinear)
+      float hb(vec2 p) {
+        vec2 q = p / res - 0.5;
+        vec2 c = floor(q), f = q - c;
+        ivec2 i = ivec2(c);
+        return mix(mix(h(i), h(i + ivec2(1, 0)), f.x), mix(h(i + ivec2(0, 1)), h(i + ivec2(1, 1)), f.x), f.y);
+      }
       void main() {
         vec3 face = vec3(0.91, 0.83, 0.66);       // birch face veneer
         vec3 core = vec3(0.86, 0.76, 0.58);
         vec3 spoil = vec3(0.33, 0.35, 0.38);
-        vec3 col;
-        float depth = zTop - vZ;
-        if (vZ <= floorZ + 1e-4) col = spoil;                   // cut through
-        else if (depth < 2e-3) col = face;                      // untouched top
-        else {
-          // the plies, banded by height on walls, the floor of a cut a shade darker
-          float band = mod(floor(depth / plyT), 2.0);
-          vec3 ply = mix(core, core * 0.82, band);
-          col = mix(core * 0.9, ply, smoothstep(0.08, 0.35, vSlope));
-        }
-        vec3 n = normalize(vN);
+        vec2 p = vXY;
+        float z = hb(p);
+        float e = 0.5 * res;
+        float dx = (hb(p + vec2(e, 0.0)) - hb(p - vec2(e, 0.0))) / (2.0 * e);
+        float dy = (hb(p + vec2(0.0, e)) - hb(p - vec2(0.0, e))) / (2.0 * e);
+        vec3 n = normalize(vec3(-dx, -dy, 1.0));
+        float slope = 1.0 - n.z;
+        float depth = zTop - z;
+        // the plies, banded by height on walls (soft-edged), the floor of a cut a shade darker
+        float ph = fract(depth / plyT);
+        float band = smoothstep(0.35, 0.5, ph) - smoothstep(0.85, 1.0, ph);
+        vec3 ply = mix(core, core * 0.88, band * plyOn);
+        vec3 col = mix(core * 0.9, ply, smoothstep(0.08, 0.35, slope));
+        // untouched top and cut-through blended over about a pixel (no stair-steps)
+        float aa = fwidth(depth) + 1e-4;
+        col = mix(face, col, smoothstep(0.0015, 0.0015 + aa, depth));
+        col = mix(col, spoil, 1.0 - smoothstep(floorZ + 1e-4, floorZ + 1e-4 + aa, z));
         float l = 0.45 + 0.55 * max(dot(n, sun), 0.0) + 0.12 * max(dot(n, normalize(vec3(-0.5, 0.6, 0.6))), 0.0);
         gl_FragColor = vec4(col * l, 1.0);
       }`,
@@ -458,6 +472,11 @@ export function openRunSim(opts) {
   $('#rsMat').onchange = () => { if ($('#rsMat').checked) update(); else { resetMaterial(); } tex.needsUpdate = true; };
   $('#rsPath').onchange = () => { future.visible = done.visible = rapids.visible = ahead.visible = $('#rsPath').checked; };
   $('#rsOnTop').onchange = () => pathOnTop($('#rsOnTop').checked);
+  // ply bands on the walls: off by default (plain walls read cleaner on radiuses), remembered
+  const setPlies = (on) => { surfMat.uniforms.plyOn.value = on ? 1 : 0; try { localStorage.setItem('cabinetcam.simPlies', on ? '1' : '0'); } catch { /* not kept */ } };
+  $('#rsPlies').checked = (() => { try { return localStorage.getItem('cabinetcam.simPlies') === '1'; } catch { return false; } })();
+  setPlies($('#rsPlies').checked);
+  $('#rsPlies').onchange = () => setPlies($('#rsPlies').checked);
   $('#rsQual').value = quality;
   $('#rsQual').onchange = () => {
     try { localStorage.setItem('cabinetcam.simQuality', $('#rsQual').value); } catch { /* not kept */ }
