@@ -3,6 +3,7 @@
 // writing G-code files straight into a folder. The browser version of the page
 // works without any of it.
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,6 +37,21 @@ function closeJob(id) {
   jobs.delete(id);
   try { j.win.destroy(); } catch { /* already gone */ }
   try { fs.unlinkSync(j.file); } catch { /* already gone */ }
+}
+
+// Windows' default printer (remembered for a minute), or null
+let defCache = { at: 0, name: null };
+function defaultPrinter() {
+  if (process.platform !== 'win32') return Promise.resolve(null);
+  if (Date.now() - defCache.at < 60000) return Promise.resolve(defCache.name);
+  return new Promise((resolve) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "(Get-CimInstance -ClassName Win32_Printer -Filter 'Default=TRUE').Name"],
+      { timeout: 5000, windowsHide: true }, (err, out) => {
+        const name = err ? null : String(out || '').trim() || null;
+        defCache = { at: Date.now(), name };
+        resolve(name);
+      });
+  });
 }
 
 // only plain file names: never a path out of the chosen folder
@@ -74,7 +90,9 @@ export function registerDesktop(getWin) {
 
   ipcMain.handle('printers', async () => {
     const list = await getWin().webContents.getPrintersAsync();
-    return list.map((p) => ({ name: p.name, label: p.displayName || p.name, isDefault: !!p.isDefault }));
+    // Electron 36+ no longer says which printer is the default: ask Windows
+    const def = list.some((p) => p.isDefault !== undefined) ? null : await defaultPrinter();
+    return list.map((p) => ({ name: p.name, label: p.displayName || p.name, isDefault: p.isDefault !== undefined ? !!p.isDefault : p.name === def }));
   });
 
   ipcMain.handle('folder:choose', async (_e, current) => {

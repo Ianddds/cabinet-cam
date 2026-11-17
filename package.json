@@ -16,14 +16,14 @@
   },
   "dependencies": {
     "clipper-lib": "^6.4.2",
-    "express": "^4.21.0",
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.8.11",
+    "express": "^4.21.0"
   },
   "main": "electron/main.js",
   "author": "Cabinet CAM",
   "devDependencies": {
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8"
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
   },
   "build": {
     "appId": "com.cabinetcam.app",
