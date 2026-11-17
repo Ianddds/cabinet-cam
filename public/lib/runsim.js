@@ -39,6 +39,8 @@ export function openRunSim(opts) {
       <span class="small rs-views">View <button data-view="top">Top</button><button data-view="iso">3D</button><button data-view="follow">Follow tool</button></span>
       <label class="small"><input type="checkbox" id="rsMat" checked> Material</label>
       <label class="small"><input type="checkbox" id="rsPath" checked> Path</label>
+      <label class="small" title="Draw the path over the material instead of down in the cuts"><input type="checkbox" id="rsOnTop"> Path on top</label>
+      <label class="small" title="How fine the material is: finer shows sharper cuts but needs a stronger graphics card">Detail <select id="rsQual"><option value="ultra">Ultra</option><option value="fine">Fine</option><option value="normal">Normal</option><option value="fast">Fast</option></select></label>
       <button id="rsClose">Close</button>
     </div>
     <div class="rs-main">
@@ -87,34 +89,102 @@ export function openRunSim(opts) {
   sun.position.set(W * 0.3, -H, 80);
   scene.add(sun);
 
-  // the material: heights on a grid, drawn as a texture on the sheet's top
-  const res = Math.max(0.04, Math.max(W, H) / 1600);
+  // ---------- the material ----------
+  // A 3-axis router with flat-end bits can't undercut, so the material is a
+  // height at every point of the sheet: a grid of heights (res inches apart)
+  // carved as the bit moves, drawn as a real 3D surface: the grid's vertices are
+  // raised to their heights on the graphics card from a height texture, so cut
+  // walls, floors and through cuts show in 3D, with the plies of the sheet
+  // banded on the walls. Quality sets the grid (finer = sharper, heavier).
+  const QUALITY = { ultra: 0.02, fine: 0.035, normal: 0.05, fast: 0.09 };
+  const quality = (() => { try { return localStorage.getItem('cabinetcam.simQuality') || 'normal'; } catch { return 'normal'; } })();
+  const res = Math.max(QUALITY[quality] || 0.05, Math.sqrt((W * H) / 12e6));   // never more than ~12M points
   const gw = Math.ceil(W / res), gh = Math.ceil(H / res);
+  const floorZ = zTop - thick;                       // the spoilboard
   const height = new Float32Array(gw * gh).fill(zTop);
-  const pix = new Uint8Array(gw * gh * 4);
-  const tex = new THREE.DataTexture(pix, gw, gh, THREE.RGBAFormat);
-  tex.magFilter = THREE.LinearFilter;
-  tex.minFilter = THREE.LinearFilter;
-  const wood = [232, 211, 168], spoil = [70, 74, 80];
-  const paint = (i) => {
-    const d = Math.max(0, Math.min(1, (zTop - height[i]) / thick));
-    const k = i * 4;
-    if (d >= 0.999) { pix[k] = spoil[0]; pix[k + 1] = spoil[1]; pix[k + 2] = spoil[2]; }
-    else {
-      const s = d > 0 ? 0.78 - 0.45 * d : 1;
-      pix[k] = wood[0] * s; pix[k + 1] = wood[1] * s; pix[k + 2] = wood[2] * s;
-    }
-    pix[k + 3] = 255;
-  };
-  for (let i = 0; i < gw * gh; i++) paint(i);
+  const tex = new THREE.DataTexture(height, gw, gh, THREE.RedFormat, THREE.FloatType);
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
   tex.needsUpdate = true;
+  // The surface is drawn in tiles of 256 x 256 points that all share one small
+  // grid (so even Ultra needs little memory); each tile is moved into place and
+  // the graphics card raises every point to its height.
+  const TILE = 256;
+  const tpos = new Float32Array(TILE * TILE * 2);
+  for (let j = 0, k = 0; j < TILE; j++) for (let i = 0; i < TILE; i++, k += 2) { tpos[k] = (i + 0.5) * res; tpos[k + 1] = (j + 0.5) * res; }
+  const tidx = new Uint16Array((TILE - 1) * (TILE - 1) * 6);
+  for (let j = 0, k = 0; j < TILE - 1; j++) for (let i = 0; i < TILE - 1; i++) {
+    const v = j * TILE + i;
+    tidx[k++] = v; tidx[k++] = v + 1; tidx[k++] = v + TILE;
+    tidx[k++] = v + 1; tidx[k++] = v + TILE + 1; tidx[k++] = v + TILE;
+  }
+  const surfG = new THREE.BufferGeometry();
+  surfG.setAttribute('position', new THREE.BufferAttribute(tpos, 2));
+  surfG.setIndex(new THREE.BufferAttribute(tidx, 1));
+  const tileSpan = (TILE - 1) * res;
+  surfG.boundingSphere = new THREE.Sphere(new THREE.Vector3(tileSpan / 2, tileSpan / 2, zTop - thick / 2), Math.hypot(tileSpan, tileSpan) / 2 + thick + 1);
+  const plies = Math.max(3, Math.round(thick / 0.055));   // Baltic birch: about 0.055" a ply
+  const surfMat = new THREE.ShaderMaterial({
+    uniforms: {
+      hmap: { value: tex }, res: { value: res }, gsize: { value: new THREE.Vector2(gw, gh) },
+      zTop: { value: zTop }, floorZ: { value: floorZ }, plyT: { value: thick / plies },
+      sun: { value: new THREE.Vector3(0.35, -0.55, 0.76).normalize() },
+    },
+    vertexShader: `
+      uniform sampler2D hmap; uniform float res; uniform vec2 gsize; uniform float floorZ;
+      varying vec3 vN; varying float vZ; varying float vSlope;
+      float h(ivec2 c) { c = clamp(c, ivec2(0), ivec2(gsize) - 1); return max(texelFetch(hmap, c, 0).r, floorZ); }
+      void main() {
+        vec4 wp = modelMatrix * vec4(position.xy, 0.0, 1.0);
+        // points past the sheet's edge fold back onto it (their triangles vanish)
+        ivec2 c = min(ivec2(floor(wp.xy / res)), ivec2(gsize) - 1);
+        vec2 xy = (vec2(c) + 0.5) * res;
+        float z = h(c);
+        float dx = (h(c + ivec2(1, 0)) - h(c - ivec2(1, 0))) / (2.0 * res);
+        float dy = (h(c + ivec2(0, 1)) - h(c - ivec2(0, 1))) / (2.0 * res);
+        vN = normalize(vec3(-dx, -dy, 1.0));
+        vSlope = 1.0 - vN.z;
+        vZ = z;
+        gl_Position = projectionMatrix * viewMatrix * vec4(xy, z, 1.0);
+      }`,
+    fragmentShader: `
+      uniform float zTop; uniform float floorZ; uniform float plyT; uniform vec3 sun;
+      varying vec3 vN; varying float vZ; varying float vSlope;
+      void main() {
+        vec3 face = vec3(0.91, 0.83, 0.66);       // birch face veneer
+        vec3 core = vec3(0.86, 0.76, 0.58);
+        vec3 spoil = vec3(0.33, 0.35, 0.38);
+        vec3 col;
+        float depth = zTop - vZ;
+        if (vZ <= floorZ + 1e-4) col = spoil;                   // cut through
+        else if (depth < 2e-3) col = face;                      // untouched top
+        else {
+          // the plies, banded by height on walls, the floor of a cut a shade darker
+          float band = mod(floor(depth / plyT), 2.0);
+          vec3 ply = mix(core, core * 0.82, band);
+          col = mix(core * 0.9, ply, smoothstep(0.08, 0.35, vSlope));
+        }
+        vec3 n = normalize(vN);
+        float l = 0.45 + 0.55 * max(dot(n, sun), 0.0) + 0.12 * max(dot(n, normalize(vec3(-0.5, 0.6, 0.6))), 0.0);
+        gl_FragColor = vec4(col * l, 1.0);
+      }`,
+  });
+  const surface = new THREE.Group();
+  for (let tj = 0; tj * (TILE - 1) < gh; tj++) for (let ti = 0; ti * (TILE - 1) < gw; ti++) {
+    const m = new THREE.Mesh(surfG, surfMat);
+    m.position.set(ti * (TILE - 1) * res, tj * (TILE - 1) * res, 0);
+    surface.add(m);
+  }
+
+  scene.add(surface);
+  // the sheet's edges and bottom (its top is the surface above)
   const side = new THREE.MeshLambertMaterial({ color: 0xc9b48a });
-  const top = new THREE.MeshLambertMaterial({ map: tex });
-  const slab = new THREE.Mesh(new THREE.BoxGeometry(W, H, thick), [side, side, side, side, top, side]);
+  const hidden = new THREE.MeshBasicMaterial({ visible: false });
+  const slab = new THREE.Mesh(new THREE.BoxGeometry(W, H, thick), [side, side, side, side, hidden, side]);
   slab.position.set(W / 2, H / 2, zTop - thick / 2);
   scene.add(slab);
   const table = new THREE.Mesh(new THREE.PlaneGeometry(W + 12, H + 12), new THREE.MeshLambertMaterial({ color: 0x555b63 }));
-  table.position.set(W / 2, H / 2, zTop - thick - 0.01);
+  table.position.set(W / 2, H / 2, floorZ - 0.01);
   scene.add(table);
 
   // part outlines on top of the sheet
@@ -130,37 +200,74 @@ export function openRunSim(opts) {
   outG.setAttribute('position', new THREE.Float32BufferAttribute(outl, 3));
   scene.add(new THREE.LineSegments(outG, new THREE.LineBasicMaterial({ color: 0x6b5a3a, transparent: true, opacity: 0.55 })));
 
-  // the toolpath: all of it faint, what's been run bright
-  const pp = [], pc = [];
-  const cRapid = new THREE.Color(0xe0453a), cCut = new THREE.Color(0x2f7fe0);
-  for (const m of T.moves) {
-    pp.push(m.a[0], m.a[1], m.a[2], m.b[0], m.b[1], m.b[2]);
-    const c = m.rapid ? cRapid : cCut;
-    pc.push(c.r, c.g, c.b, c.r, c.g, c.b);
-  }
-  const pathG = new THREE.BufferGeometry();
-  pathG.setAttribute('position', new THREE.Float32BufferAttribute(pp, 3));
-  pathG.setAttribute('color', new THREE.Float32BufferAttribute(pc, 3));
-  const future = new THREE.LineSegments(pathG, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.18 }));
-  const doneG = pathG.clone();
-  const done = new THREE.LineSegments(doneG, new THREE.LineBasicMaterial({ vertexColors: true }));
-  scene.add(future, done);
+  // the toolpath: rapids red, plunges orange, cuts coloured by depth (light blue
+  // near the top, deep blue at the bottom, violet below the sheet). What's been
+  // run is bright, what's to come faint, and the next few moves yellow. "Path on
+  // top" draws it over the material instead of buried in the cuts.
+  const cRapid = new THREE.Color(0xff4d3d), cPlunge = new THREE.Color(0xffa020);
+  const cShallow = new THREE.Color(0x7fd3ff), cDeep = new THREE.Color(0x1f4fd0), cThrough = new THREE.Color(0xb04dff);
+  const colorOf = (m) => {
+    if (m.rapid) return cRapid;
+    const xy = Math.hypot(m.b[0] - m.a[0], m.b[1] - m.a[1]);
+    if (xy < 1e-6 && m.b[2] < m.a[2]) return cPlunge;
+    const z = Math.min(m.a[2], m.b[2]);
+    if (z < floorZ - 1e-4) return cThrough;
+    return cShallow.clone().lerp(cDeep, Math.max(0, Math.min(1, (zTop - z) / thick)));
+  };
+  // cuts and rapids drawn apart: cuts bright once run (faint before), rapids
+  // always faint so they don't bury the cuts; the next moves yellow
+  const cutP = [], cutC = [], rapP = [], allP = [];
+  const cutsBefore = new Int32Array(T.moves.length + 1), rapsBefore = new Int32Array(T.moves.length + 1);
+  T.moves.forEach((m, i) => {
+    const seg = [m.a[0], m.a[1], m.a[2] + 0.004, m.b[0], m.b[1], m.b[2] + 0.004];
+    allP.push(...seg);
+    if (m.rapid) rapP.push(...seg);
+    else { cutP.push(...seg); const c = colorOf(m); cutC.push(c.r, c.g, c.b, c.r, c.g, c.b); }
+    cutsBefore[i + 1] = cutsBefore[i] + (m.rapid ? 0 : 1);
+    rapsBefore[i + 1] = rapsBefore[i] + (m.rapid ? 1 : 0);
+  });
+  const geo = (p, c) => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
+    if (c) g.setAttribute('color', new THREE.Float32BufferAttribute(c, 3));
+    return g;
+  };
+  const pathG = geo(cutP, cutC), doneG = geo(cutP, cutC), rapG = geo(rapP), aheadG = geo(allP);
+  const futureMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.2 });
+  const doneMat = new THREE.LineBasicMaterial({ vertexColors: true });
+  const rapMat = new THREE.LineBasicMaterial({ color: cRapid, transparent: true, opacity: 0.28 });
+  const aheadMat = new THREE.LineBasicMaterial({ color: 0xffe14d });
+  const future = new THREE.LineSegments(pathG, futureMat);
+  const done = new THREE.LineSegments(doneG, doneMat);
+  const rapids = new THREE.LineSegments(rapG, rapMat);
+  const AHEAD = 40;   // moves shown ahead of the bit
+  const ahead = new THREE.LineSegments(aheadG, aheadMat);
+  future.renderOrder = done.renderOrder = rapids.renderOrder = ahead.renderOrder = 2;
+  scene.add(future, done, rapids, ahead);
+  const pathOnTop = (on) => { for (const mt of [futureMat, doneMat, rapMat, aheadMat]) { mt.depthTest = !on; mt.needsUpdate = true; } };
 
   // the tool: the bit and the spindle above it
   const toolGroup = new THREE.Group();
-  const bitMat = new THREE.MeshLambertMaterial({ color: 0xd8dde3 });
+  const bitMat = new THREE.MeshLambertMaterial({ color: 0xe8ecf0, emissive: 0x222222 });
+  const shankMat = new THREE.MeshLambertMaterial({ color: 0x8d949c });
   let bit = null;
   const setBit = (dia) => {
-    if (bit) { toolGroup.remove(bit); bit.geometry.dispose(); }
-    bit = new THREE.Mesh(new THREE.CylinderGeometry(dia / 2, dia / 2, 1.25, 24), bitMat);
-    bit.rotation.x = Math.PI / 2;
-    bit.position.z = 0.625;
+    if (bit) { toolGroup.remove(bit); bit.traverse((o) => o.geometry?.dispose()); }
+    bit = new THREE.Group();
+    // the cutting length bright, the shank above it darker
+    const flutes = new THREE.Mesh(new THREE.CylinderGeometry(dia / 2, dia / 2, 0.9, 28), bitMat);
+    flutes.rotation.x = Math.PI / 2;
+    flutes.position.z = 0.45;
+    const shank = new THREE.Mesh(new THREE.CylinderGeometry(Math.max(dia / 2, 0.125), Math.max(dia / 2, 0.125), 0.35, 28), shankMat);
+    shank.rotation.x = Math.PI / 2;
+    shank.position.z = 0.9 + 0.175;
+    bit.add(flutes, shank);
     toolGroup.add(bit);
   };
   const nut = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 0.9, 24), new THREE.MeshLambertMaterial({ color: 0x8a9099 }));
   nut.rotation.x = Math.PI / 2;
   nut.position.z = 1.25 + 0.45;
-  const motor = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 6, 32), new THREE.MeshLambertMaterial({ color: 0x3d6fb6, transparent: true, opacity: 0.35 }));
+  const motor = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 6, 32), new THREE.MeshLambertMaterial({ color: 0x3d6fb6, transparent: true, opacity: 0.12, depthWrite: false }));
   motor.rotation.x = Math.PI / 2;
   motor.position.z = 1.25 + 0.9 + 3;
   toolGroup.add(nut, motor);
@@ -175,7 +282,7 @@ export function openRunSim(opts) {
     const span = Math.max(W, H);
     if (v === 'top') { camera.position.set(W / 2, H / 2 - 0.001, span * 1.05); }
     else if (v === 'iso') { camera.position.set(W * 0.45, -H * 1.25, span * 0.75); }
-    else { const p = toolGroup.position; camera.position.set(p.x, p.y - 14, p.z + 12); c.copy(p); }
+    else { const p = toolGroup.position; c.set(p.x, p.y, zTop); camera.position.set(p.x + 4, p.y - 9, zTop + 7); }
     controls.target.copy(c);
     controls.update();
     for (const b of root.querySelectorAll('[data-view]')) b.classList.toggle('active', b.dataset.view === v);
@@ -197,7 +304,7 @@ export function openRunSim(opts) {
 
   // ---------- cutting the material ----------
   let stamped = { idx: 0, frac: 0 };   // material taken away up to here
-  let texDirty = false;
+  let texDirty = false, dirtyLo = Infinity, dirtyHi = -1, fullUpload = true;
   const stampAt = (x, y, z, r) => {
     if (z >= zTop - 1e-4) return;
     const i0 = Math.max(0, Math.floor((x - r) / res)), i1 = Math.min(gw - 1, Math.floor((x + r) / res));
@@ -209,7 +316,7 @@ export function openRunSim(opts) {
         const cx = (i + 0.5) * res - x;
         if (cx * cx + cy * cy > r2) continue;
         const k = j * gw + i;
-        if (z < height[k]) { height[k] = z; paint(k); texDirty = true; }
+        if (z < height[k]) { height[k] = z; texDirty = true; if (j < dirtyLo) dirtyLo = j; if (j > dirtyHi) dirtyHi = j; }
       }
     }
   };
@@ -225,8 +332,8 @@ export function openRunSim(opts) {
   };
   const resetMaterial = () => {
     height.fill(zTop);
-    for (let i = 0; i < gw * gh; i++) paint(i);
     stamped = { idx: 0, frac: 0 };
+    fullUpload = true;
     texDirty = true;
   };
   const cutTo = (st) => {
@@ -237,6 +344,23 @@ export function openRunSim(opts) {
     }
     const f1 = st.done ? 1 : st.frac;
     if (f1 > stamped.frac) { stampMove(T.moves[st.idx], stamped.frac, f1); stamped.frac = f1; }
+  };
+
+  // only the rows of the height grid that changed go to the graphics card (Ultra's grid is large)
+  const gl = renderer.getContext();
+  const uploadHeights = () => {
+    const glTex = renderer.properties.get(tex).__webglTexture;
+    if (fullUpload || !glTex) { tex.needsUpdate = true; fullUpload = false; }
+    else if (dirtyHi >= dirtyLo) {
+      renderer.state.bindTexture(gl.TEXTURE_2D, glTex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, dirtyLo, gw, dirtyHi - dirtyLo + 1, gl.RED, gl.FLOAT, height.subarray(dirtyLo * gw, (dirtyHi + 1) * gw));
+    }
+    texDirty = false;
+    dirtyLo = Infinity;
+    dirtyHi = -1;
   };
 
   // ---------- G-code lines ----------
@@ -274,11 +398,12 @@ export function openRunSim(opts) {
     $('#rsS').textContent = st.spindle && !(inStop && inStop.kind !== 'dwell') ? 'on' : 'off';
     $('#rsState').textContent = inStop ? (inStop.kind === 'dwell' ? 'Spindle spin-up / dwell' : inStop.kind === 'tool' ? 'Bit change' : 'Stopped') : st.done && st.idx === T.moves.length - 1 ? 'Finished' : m.rapid ? 'Rapid' : Math.abs(m.b[2] - m.a[2]) > 1e-6 && Math.hypot(m.b[0] - m.a[0], m.b[1] - m.a[1]) < 1e-6 ? 'Plunge' : 'Cutting';
     showLines(inStop ? inStop.line : st.line);
-    doneG.setDrawRange(0, (st.idx + (st.done ? 1 : 0)) * 2);
+    doneG.setDrawRange(0, cutsBefore[st.idx + (st.done ? 1 : 0)] * 2);
+    { const a0 = st.idx + (st.done ? 1 : 0); aheadG.setDrawRange(a0 * 2, Math.min(AHEAD, T.moves.length - a0) * 2); }
     if ($('#rsMat').checked) cutTo(st);
     $('#rsScrub').value = String(Math.round((t / T.total) * 1000));
     $('#rsTime').textContent = `${clock(t)} / ${clock(T.total)} · ${((t / T.total) * 100).toFixed(1)}%`;
-    if (follow) { const d = camera.position.clone().sub(controls.target); controls.target.copy(toolGroup.position); camera.position.copy(toolGroup.position).add(d); }
+    if (follow) { const d = camera.position.clone().sub(controls.target); controls.target.set(st.p[0], st.p[1], zTop); camera.position.copy(controls.target).add(d); }
   };
   const frame = (now) => {
     raf = requestAnimationFrame(frame);
@@ -293,7 +418,7 @@ export function openRunSim(opts) {
       if (t >= T.total) setPlaying(false);
       update();
     }
-    if (texDirty && now - lastTex > 90) { tex.needsUpdate = true; texDirty = false; lastTex = now; }
+    if (texDirty && now - lastTex > 60) { uploadHeights(); lastTex = now; }
     controls.update();
     renderer.render(scene, camera);
   };
@@ -313,8 +438,18 @@ export function openRunSim(opts) {
     setPlaying(false);
   };
   $('#rsScrub').oninput = (e) => { setPlaying(false); seek((+e.target.value / 1000) * T.total); };
-  $('#rsMat').onchange = () => { if ($('#rsMat').checked) update(); else { resetMaterial(); } };
-  $('#rsPath').onchange = () => { future.visible = done.visible = $('#rsPath').checked; };
+  $('#rsMat').onchange = () => { if ($('#rsMat').checked) update(); else { resetMaterial(); } tex.needsUpdate = true; };
+  $('#rsPath').onchange = () => { future.visible = done.visible = rapids.visible = ahead.visible = $('#rsPath').checked; };
+  $('#rsOnTop').onchange = () => pathOnTop($('#rsOnTop').checked);
+  $('#rsQual').value = quality;
+  $('#rsQual').onchange = () => {
+    try { localStorage.setItem('cabinetcam.simQuality', $('#rsQual').value); } catch { /* not kept */ }
+    // a new grid: start the simulator again where it is
+    const at = t;
+    close();
+    const again = openRunSim(opts);
+    again.seek(at);
+  };
   const key = (e) => {
     if (e.key === 'Escape') close();
     else if (e.key === ' ' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'SELECT') { e.preventDefault(); $('#rsPlay').click(); }
@@ -324,6 +459,7 @@ export function openRunSim(opts) {
     ro.disconnect();
     removeEventListener('keydown', key);
     controls.dispose();
+    surfG.dispose(); surfMat.dispose(); tex.dispose(); pathG.dispose(); doneG.dispose(); rapG.dispose(); aheadG.dispose();
     renderer.dispose();
     root.remove();
   };
@@ -331,5 +467,5 @@ export function openRunSim(opts) {
   addEventListener('keydown', key);
   update();
   raf = requestAnimationFrame(frame);
-  return { close, timeline: T, program: prog, seek: (x) => seek(x), state: () => T.at(t) };
+  return { close, timeline: T, program: prog, seek: (x) => seek(x), state: () => T.at(t), material: { height, gw, gh, res } };
 }
