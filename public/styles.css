@@ -70,6 +70,7 @@ input[type="checkbox"] { width: auto; }
 .check.inline { margin: 0; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
 .span2 { grid-column: span 2; }
+.span3 { grid-column: 1 / -1; }
 .row { display: flex; gap: 8px; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
@@ -277,3 +278,4 @@ tr.group .caret { display: inline-block; width: 1em; }
   border: 1px solid color-mix(in srgb, #d9a400 60%, var(--line)); border-radius: 6px;
   background: color-mix(in srgb, #d9a400 14%, var(--panel)); color: var(--ink); font-size: 13px; }
 .stale-bar span { flex: 1; min-width: 200px; }
+tr.group td.gtick { cursor: default; }

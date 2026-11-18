@@ -1000,6 +1000,27 @@ for (const g of groupParts(parts)) {
         const sbp = postShopBot(tp.moves, { ...cfgS, post: 'sbp' }, {});
         const gc = postGcode(tp.moves, { ...cfgS, post: 'fluidnc' }, {});
         if (sh.screws.length) check(/C7\n'Drive a screw[^\n]*\nPAUSE/.test(sbp) && /M5\n\(Drive a screw[^\n]*\)\nM0/.test(gc), 'posts: spindle off and a stop after the screw holes');
+        // screw holes in their own file: the sheet's file has no screw holes and no
+        // stop and cuts the same; the screw file is the same first bit, every hole, parked
+        if (sh.screws.length) {
+          const sep = sheetToolpaths(sh, { ...cfgS, screws: { ...s.screws, separate: true } });
+          check(!sep.moves.some((m) => m.op === 'screw' || m.pause), 'separate screw file: none of it in the sheet file, no stop');
+          // (the order can shift a little: the bit no longer starts from the park position)
+          const cutLen = (mv) => { let L = 0, p = null; for (const m of mv) { if (m.x == null) continue; if (p && m.g === 1 && m.op !== 'screw' && Math.min(p.z, m.z) < 0) L += Math.hypot(m.x - p.x, m.y - p.y); p = m; } return L; };
+          const la = cutLen(tp.moves), lb = cutLen(sep.moves);
+          check(Math.abs(la - lb) <= 0.01 * la, `separate screw file: the sheet cuts the same (${la.toFixed(1)} vs ${lb.toFixed(1)} in)`);
+          const sm = sep.screwMoves || [];
+          const firstTool = tp.moves.find((m) => m.toolchange)?.tool;
+          check(sm[0]?.toolchange && sm[0].tool === firstTool && sep.moves.find((m) => m.toolchange)?.tool === firstTool, 'separate screw file: drilled with the sheet\'s first bit');
+          const holes = new Set(sm.filter((m) => m.op === 'screw' && m.plunge).map((m) => `${m.x.toFixed(3)},${m.y.toFixed(3)}`));
+          check(holes.size === sh.screws.length && !sm.some((m) => m.pause || (m.g === 1 && m.op !== 'screw')), `separate screw file: ${sh.screws.length} holes and nothing else (${holes.size})`);
+          const park = cfgS.park || { x: 0, y: 0 };
+          const last = [...sm].reverse().find((m) => m.x != null);
+          check(last && Math.abs(last.x - park.x) < 1e-6 && Math.abs(last.y - park.y) < 1e-6 && last.z >= cfgS.safeZ - 1e-6, 'separate screw file: ends parked at safe Z');
+          const sgc = postGcode(sm, { ...cfgS, post: 'fluidnc' }, {});
+          const ssb = postShopBot(sm, { ...cfgS, post: 'sbp' }, {});
+          check(!/Drive a screw/.test(sgc + ssb) && /M30|M2\b/.test(sgc) && /END/.test(ssb), 'separate screw file: posts as a complete program with no stop for screws');
+        }
         // simulation: clear; and a screw planted on a part is caught
         if (!faults.planted && sh.screws.length) {
           const sim = carve(sh, tp.moves, { res: 0.04, dia: tl.tool.dia });

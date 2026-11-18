@@ -1836,31 +1836,36 @@ function sheetPlan(sheet, cfg, joinSkip) {
   // and continues. The nest left every spot clear of all cuts.
   // (hand-placed screws are drilled whether or not automatic screws are on)
   const SCR = (cfg.screws?.on || sheet.screwsManual) && sheet.screws?.length ? { head: 0.375, clear: 0.125, depth: 0.25, ...cfg.screws } : null;
+  // screws.separate: the screw holes go in a file of their own (screwMoves),
+  // drilled with the sheet's first bit and ending parked; the sheet's file then
+  // starts straight in on the cutting, with no stop
+  const sepScrews = !!(SCR && cfg.screws?.separate);
   let screwsDone = !SCR;
-  const drillScrews = (t) => {
+  let screwTool = null;
+  const drillScrews = (t, b = pb, stop = true) => {
     const depth = SCR.depth > 0 ? SCR.depth : T + (cfg.overcut || 0);
     if (depth >= T && t.dia >= (SCR.head || 0.375) - 1e-6) warnings.push(`Screw holes go right through with the ${t.name || t.dia + 'in'} bit, which is as wide as the screw heads (${SCR.head}"): the heads will pull through. Set Hole depth to a counterbore (e.g. 0.25) or use washers.`);
     const peck = t.peck || 0;
-    const prevOp = pb.op;
-    pb.op = 'screw';
-    pb.comment(`Screw holes: ${sheet.screws.length} with ${t.name || t.dia + 'in'}, ${depth.toFixed(3)} deep`);
+    const prevOp = b.op;
+    b.op = 'screw';
+    b.comment(`Screw holes: ${sheet.screws.length} with ${t.name || t.dia + 'in'}, ${depth.toFixed(3)} deep`);
     for (const q of orderShortest(sheet.screws, home, (q, pos) => dist([q.x, q.y], pos), (q) => [q.x, q.y])) {
-      pb.rapidTo(q.x, q.y);
-      pb.rapidZ(0.05);
+      b.rapidTo(q.x, q.y);
+      b.rapidZ(0.05);
       let z = 0;
       while (z > -depth + 1e-6) {
         const nz = peck > 0 ? Math.max(-depth, z - peck) : -depth;
-        if (z < 0) pb.rapidZ(z + 0.02);
-        pb.plunge(nz);
+        if (z < 0) b.rapidZ(z + 0.02);
+        b.plunge(nz);
         z = nz;
-        if (z > -depth + 1e-6) pb.rapidZ(0.05);
+        if (z > -depth + 1e-6) b.rapidZ(0.05);
       }
-      pb.retract();
+      b.retract();
     }
     const park = cfg.park || { x: 0, y: 0 };
-    pb.rapidTo(park.x, park.y);
-    pb.pause(`Drive a screw in each of the ${sheet.screws.length} holes just drilled, keep clear of the machine, then continue`);
-    pb.op = prevOp;
+    b.rapidTo(park.x, park.y);
+    if (stop) b.pause(`Drive a screw in each of the ${sheet.screws.length} holes just drilled, keep clear of the machine, then continue`);
+    b.op = prevOp;
     curPart = null;
   };
   const load = (t, note) => {
@@ -1868,7 +1873,13 @@ function sheetPlan(sheet, cfg, joinSkip) {
     pb.toolchange(t, note || `${t.name || ''} ${t.dia}in`);
     loaded = t;
     curPart = null;
-    if (!screwsDone) { screwsDone = true; drillScrews(t); }
+    if (!screwsDone) {
+      screwsDone = true;
+      if (sepScrews) {
+        screwTool = t;
+        pb.comment(`Hold-down screws: run the screw file for this sheet first (${sheet.screws.length} holes with this bit) and drive the screws before running this one`);
+      } else drillScrews(t);
+    }
   };
   const drillWith = (t) => {
     const ops = drillOps.filter((o) => o.tool === t);
@@ -2613,5 +2624,14 @@ function sheetPlan(sheet, cfg, joinSkip) {
     prev = m;
   }
   const mt = machineTime(pb.moves, cfg);
-  return { joins: joinCount, moves: pb.moves, warnings, tabs: tabMarks, tabPaths, stats: { sharedLength: sharedTotal, cutLength: cutLen, rapidLength: rapidLen, estMinutes: mt.total / 60, time: mt, minX, minY, maxX, maxY, minZ } };
+  // the screw file: the same first bit, the holes, then park (no stop: the program ends)
+  let screwMoves = null;
+  if (sepScrews && screwTool) {
+    const sb = new PathBuilder(cfg.safeZ);
+    sb.hopZ = pb.hopZ;
+    sb.toolchange(screwTool, `${screwTool.name || ''} ${screwTool.dia}in`);
+    drillScrews(screwTool, sb, false);
+    screwMoves = sb.moves;
+  }
+  return { joins: joinCount, moves: pb.moves, screwMoves, warnings, tabs: tabMarks, tabPaths, stats: { sharedLength: sharedTotal, cutLength: cutLen, rapidLength: rapidLen, estMinutes: mt.total / 60, time: mt, minX, minY, maxX, maxY, minZ } };
 }

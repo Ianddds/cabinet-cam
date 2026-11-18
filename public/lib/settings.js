@@ -50,7 +50,7 @@ export const DEFAULT_SETTINGS = {
   // screw hold-downs: 5 screws (corners + centre of the parts' area), in spots the nest
   // keeps clear; the first bit drills them, the machine parks and stops for
   // the operator to drive the screws, then carries on
-  screws: { on: false, head: 0.375, clear: 0.125, depth: 0.25 },   // head dia, clearance from the head to any cut, hole depth (0 = through)
+  screws: { on: false, head: 0.375, clear: 0.125, depth: 0.25, separate: false },   // head dia, clearance from the head to any cut, hole depth (0 = through); separate = screw holes in their own file
   sbpMaxTool: 30,                 // highest tool number ShopBot's C9 accepts
   sbpSpindleOn: 'C6',
   sbpSpindleOff: 'C7',

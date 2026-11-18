@@ -38,10 +38,11 @@ function markStale() {
 function showStale() {
   $('#staleBar').hidden = !stale;
   // files, layouts and labels from out-of-date sheets would be wrong
-  const off = stale || !!results.pendingShapes;
+  const busy = results.some((r) => r.sheets.some((x) => x.replanning));   // a sheet's toolpaths are being redone
+  const off = stale || busy || !!results.pendingShapes;
   for (const id of ['#saveFilesBtn', '#saveFilesMore']) $(id).disabled = off;
-  $('#printMenuBtn').disabled = stale;
-  $('#markCut').disabled = (stale || !!results.pendingShapes) && !job.cut;
+  $('#printMenuBtn').disabled = stale || busy;
+  $('#markCut').disabled = (stale || busy || !!results.pendingShapes) && !job.cut;
 }
 let activeSheet = 0;
 let moveEdit = false;   // sheet view: drag parts by hand (they snap to the nearest spot that fits)
@@ -232,7 +233,10 @@ function renderParts() {
   for (const g of groups) {
     const count = g.parts.filter((p) => p.include).reduce((a, p) => a + (forRun(p).qty || 0) + pendingOf(p), 0);
     const open = groupOpen(g);
-    rows += `<tr class="group${open ? '' : ' shut'}" data-g="${esc(g.key)}" title="Click to ${open ? 'collapse' : 'expand'}"><td colspan="10"><span class="caret">${open ? '▾' : '▸'}</span> ${esc(g.key)} — ${count} pcs${open ? '' : ` <span class="muted small">(${g.parts.length} line${g.parts.length === 1 ? '' : 's'} hidden)</span>`}</td></tr>`;
+    // tick for the whole material: all on, all off, or a dash when some are
+    const on = g.parts.filter((p) => p.include).length;
+    const gTick = `<input type="checkbox" data-ginc title="Tick or untick every part in ${esc(g.key)}" ${on === g.parts.length ? 'checked' : ''} ${on && on < g.parts.length ? 'data-mixed' : ''}>`;
+    rows += `<tr class="group${open ? '' : ' shut'}" data-g="${esc(g.key)}" title="Click to ${open ? 'collapse' : 'expand'}"><td class="gtick">${gTick}</td><td colspan="9"><span class="caret">${open ? '▾' : '▸'}</span> ${esc(g.key)} — ${count} pcs${open ? '' : ` <span class="muted small">(${g.parts.length} line${g.parts.length === 1 ? '' : 's'} hidden)</span>`}</td></tr>`;
     if (!open) continue;
     for (const p of g.parts) {
       const i = job.parts.indexOf(p);
@@ -255,6 +259,7 @@ function renderParts() {
     }
   }
   wrap.innerHTML = `<table><thead><tr><th></th><th>Part</th><th>Cab</th><th>Qty</th><th>Length</th><th>Width</th><th>Thk</th><th>Grain</th><th>Dados</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  for (const cb of wrap.querySelectorAll('input[data-ginc][data-mixed]')) cb.indeterminate = true;
   const total = runParts().filter((p) => p.include).reduce((a, p) => a + (p.qty || 0) + pendingOf(p), 0);
   $('#partsSummary').textContent = `${job.parts.length} unique · ${total} pcs · ${groups.length} material group${groups.length === 1 ? '' : 's'}`;
   $('#nestBtn').disabled = total === 0;
@@ -301,6 +306,16 @@ function renderCutList() {
 }
 
 $('#partsTable').addEventListener('change', (e) => {
+  // the material's tick: every part in it on or off
+  if (e.target.hasAttribute('data-ginc')) {
+    const g = groupParts(job.parts).find((x) => x.key === e.target.closest('tr.group').dataset.g);
+    if (!g) return;
+    commitPending();
+    for (const p of g.parts) p.include = e.target.checked;
+    renderParts();
+    markStale();
+    return;
+  }
   const tr = e.target.closest('tr[data-i]');
   if (!tr) return;
   const p = job.parts[+tr.dataset.i];
@@ -315,6 +330,7 @@ $('#partsTable').addEventListener('change', (e) => {
 });
 $('#partsTable').addEventListener('click', (e) => {
   const gr = e.target.closest('tr.group[data-g]');
+  if (gr && e.target.closest('td.gtick')) return;   // the material's tick, not a collapse
   if (gr) {
     const g = groupParts(job.parts).find((x) => x.key === gr.dataset.g);
     if (g) { groupState.set(g.key, !groupOpen(g)); renderParts(); }
@@ -690,7 +706,11 @@ function runNest() {
       if (bad) stockNotes.push(`${g.key} ${what}: ${bad} hold-down screw${bad === 1 ? ' is' : 's are'} in a bad spot (red) — move ${bad === 1 ? 'it' : 'them'} before cutting`);
       if (s.screws?.on && !sheet.screwsManual && sheet.screwsMissing) stockNotes.push(`${g.key} ${what}: room for only ${sheet.screws.length} of 5 hold-down screws — hold the rest of the sheet another way`);
       if (s.screws?.on && !sheet.screwsManual && sheet.screwsInKeeper) stockNotes.push(`${g.key} ${what}: ${sheet.screwsInKeeper} hold-down screw${sheet.screwsInKeeper === 1 ? '' : 's'} had to go in the offcut being kept (no scrap in that part of the sheet) — it will have the hole${sheet.screwsInKeeper === 1 ? '' : 's'}`);
-      return { sheet, tp, cfg, title, mkey, idx: i, screwChk: chk, file: `${stamp}_${mat}_${g.thickness.toFixed(3)}_${sheet.remnant ? 'R' + (rno ?? 'x') : 'S' + (i + 1)}.${ext}`, text: null, group: g };
+      // sheet numbers padded (S01 … S10 sort right everywhere); see nameFiles for the screw-file pair
+      const nw = Math.max(2, String(nest.sheets.length).length);
+      const item = { sheet, tp, cfg, title, mkey, idx: i, screwChk: chk, base: `${stamp}_${mat}_${g.thickness.toFixed(3)}_${sheet.remnant ? 'R' + (rno ?? 'x') : 'S' + String(i + 1).padStart(nw, '0')}`, ext, text: null, group: g };
+      nameFiles(item);
+      return item;
     });
     results.push({ group: g, sheets, unplaced: nest.unplaced, lowerBound: nest.stats?.lowerBound });
   }
@@ -732,6 +752,67 @@ function applyManualScrews(sheet, list) {
   }
 }
 
+// After a hand edit (tabs, screws, moved / pasted / deleted parts) the sheet's
+// toolpaths are re-planned in a worker (toolpath-worker.js): the new layout shows
+// at once, its toolpaths (and Check cut) when the worker answers. A newer edit
+// makes an older answer stale. No worker (or it fails): plan here, as before.
+let tpWorker = null;
+let replanSeq = 0;
+function toolpathWorker() {
+  if (tpWorker) return tpWorker;
+  const w = new Worker(new URL('./lib/toolpath-worker.js', import.meta.url), { type: 'module' });
+  const pending = new Map();
+  w.onmessage = (e) => {
+    const p = pending.get(e.data.id);
+    pending.delete(e.data.id);
+    if (!p) return;
+    if (e.data.error) p.sync(); else p.done(e.data.tp, e.data.chk);
+  };
+  w.onerror = (e) => {
+    e.preventDefault?.();
+    for (const p of pending.values()) p.sync();
+    pending.clear();
+    tpWorker = null;
+    w.terminate();
+  };
+  tpWorker = { w, pending };
+  return tpWorker;
+}
+function replanSheet(item) {
+  const id = ++replanSeq;
+  item.replanId = id;
+  item.replanning = true;
+  item.text = null;
+  item.screwText = null;
+  item.sim = null;
+  const done = (tp, chk) => {
+    if (item.replanId !== id) return;   // a newer edit's plan is on its way
+    item.tp = tp;
+    nameFiles(item);
+    item.screwChk = chk;
+    item.replanning = false;
+    item.text = null;
+    item.screwText = null;
+    item.sim = null;
+    renderResults();
+  };
+  const sync = () => {
+    if (item.replanId !== id) return;
+    const tp = sheetToolpaths(item.sheet, item.cfg);
+    done(tp, screwsShown(item.cfg, item.sheet) ? screwCheck(item.sheet, tp.moves, item.cfg) : []);
+  };
+  try {
+    const wk = toolpathWorker();
+    wk.pending.set(id, { done, sync });
+    wk.w.postMessage({ id, sheet: item.sheet, cfg: item.cfg, checkScrews: screwsShown(item.cfg, item.sheet) });
+  } catch {
+    tpWorker?.pending.delete(id);
+    sync();
+    return;
+  }
+  renderResults();   // the new layout now; its toolpaths follow
+}
+
 // new screw list for one sheet (null = back to automatic): redo its toolpath
 function setSheetScrews(item, list) {
   job.manualScrews = job.manualScrews || {};
@@ -740,11 +821,32 @@ function setSheetScrews(item, list) {
   else delete m[item.idx];
   if (!Object.keys(m).length) delete job.manualScrews[item.mkey];
   applyManualScrews(item.sheet, list);
-  item.tp = sheetToolpaths(item.sheet, item.cfg);
-  item.screwChk = screwsShown(item.cfg, item.sheet) ? screwCheck(item.sheet, item.tp.moves, item.cfg) : [];
-  item.text = null;
-  item.sim = null;
-  renderResults();
+  replanSheet(item);
+}
+
+// A sheet's files: with separate screw holes, the screw file first (run it,
+// drive the screws, then the sheet's own file); otherwise just the sheet's.
+// File names: a sheet with its screw holes in their own file gets a pair that
+// lists in run order in any file list: …_S01a_screws.nc, then …_S01b.nc.
+// Otherwise just …_S01.nc. Redone whenever the sheet's toolpath is.
+function nameFiles(item) {
+  const pair = item.tp.screwMoves?.length > 0;
+  item.file = `${item.base}${pair ? 'b' : ''}.${item.ext}`;
+  item.screwFile = pair ? `${item.base}a_screws.${item.ext}` : null;
+}
+const screwFileName = (item) => item.screwFile;
+function screwTextFor(item) {
+  if (!item.screwText) {
+    const r = postWithWarnings(item.tp.screwMoves, item.cfg, { title: `${item.title} | screw holes`, material: item.group.material, fileName: screwFileName(item), sheetW: item.sheet.w, sheetH: item.sheet.h });
+    item.screwText = r.text;
+  }
+  return item.screwText;
+}
+function filesFor(item) {
+  const f = [];
+  if (item.tp.screwMoves?.length) f.push({ name: screwFileName(item), text: screwTextFor(item) });
+  f.push({ name: item.file, text: textFor(item) });
+  return f;
 }
 
 function textFor(item) {
@@ -839,17 +941,20 @@ function showOutFolder() {
 async function saveToFolder(items) {
   const folder = outFolder() || await chooseOutFolder();
   if (!folder) return;
-  const r = await desk.writeFiles(folder, items.map((x) => ({ name: x.file, text: textFor(x) })));
+  const r = await desk.writeFiles(folder, items.flatMap(filesFor));
   if (!r.ok) { showMessages([{ error: true, text: `Couldn't save to ${folder}: ${r.error}` }]); return; }
   const rep = r.replaced.length ? ` (${r.replaced.length} replaced an older file of the same name)` : '';
   showMessages([{ text: `Saved ${r.written.length === 1 ? r.written[0] : r.written.length + ' files'} to ${folder}${rep}.` }]);
 }
 showOutFolder();
 async function downloadAll() {
-  for (const x of results.flatMap((r) => r.sheets)) {
-    download(x.file, textFor(x));
+  for (const f of results.flatMap((r) => r.sheets).flatMap(filesFor)) {
+    download(f.name, f.text);
     await new Promise((r) => setTimeout(r, 350));
   }
+}
+async function downloadSheet(item) {
+  for (const f of filesFor(item)) { download(f.name, f.text); await new Promise((r) => setTimeout(r, 350)); }
 }
 const allSheets = () => results.flatMap((r) => r.sheets);
 const thisSheet = () => allSheets()[activeSheet];
@@ -857,17 +962,17 @@ const thisSheet = () => allSheets()[activeSheet];
 $('#saveFilesBtn').onclick = () => (desk ? saveToFolder(allSheets()) : downloadAll());
 $('#saveFilesMore').onclick = (e) => {
   const item = thisSheet();
-  const one = item ? item.file : '';
+  const one = item ? item.file + (item.tp.screwMoves?.length ? ' + screws' : '') : '';
   showMenuAt(e.currentTarget, desk ? [
     [`Save this sheet to folder (${one})`, () => saveToFolder([item]), { disabled: !item }],
     null,
     ['Download all', () => downloadAll()],
-    [`Download this sheet (${one})`, () => download(item.file, textFor(item)), { disabled: !item }],
+    [`Download this sheet (${one})`, () => downloadSheet(item), { disabled: !item }],
     null,
     ['Choose G-code folder…', () => chooseOutFolder()],
     ['Open G-code folder', () => desk.openFolder(outFolder()), { disabled: !outFolder() }],
   ] : [
-    [`Download this sheet (${one})`, () => download(item.file, textFor(item)), { disabled: !item }],
+    [`Download this sheet (${one})`, () => downloadSheet(item), { disabled: !item }],
   ]);
 };
 
@@ -907,7 +1012,9 @@ function renderSheet(item) {
   }
   const flip = (poly) => poly.map(([x, y]) => [x, fy(y)]);
   const partNo = numberPlacements(item.sheet);
-  const sim = showSim ? simulateSheet(item) : null;
+  // Check cut carves the whole sheet: drawn first without it, then it follows
+  if (showSim && !item.sim && !item.replanning) setTimeout(() => { if (showSim && !item.sim && !item.replanning && allSheets()[activeSheet] === item) { simulateSheet(item); renderResults(); } }, 30);
+  const sim = showSim && !item.replanning ? item.sim : null;
   if (sim) svg += `<image href="${sim.url}" x="0" y="${H - sim.H}" width="${sim.W}" height="${sim.H}" preserveAspectRatio="none" style="image-rendering:pixelated"/>`;
   item.sheet.placements.forEach((pl, idx) => {
     const g = placedGeometry(pl);
@@ -926,7 +1033,7 @@ function renderSheet(item) {
     svg += `<text class="partno" x="${g.box.x0 + 0.5}" y="${fy(g.box.y1) + 1.6}">#${partNo.get(pl)}</text>`;
     svg += '</g>';
   });
-  if (showPaths) {
+  if (showPaths && !item.replanning) {
     let cut = '', rapid = '', tab = '', prev = null;
     for (const m of item.tp.moves) {
       if (m.x == null) continue;
@@ -947,7 +1054,7 @@ function renderSheet(item) {
     }
   }
   // tabs: where the bit lifts to leave a bridge (hand-placed ones can be dragged in Place tabs)
-  if (item.tp.tabs?.length && (showPaths || tabEdit)) {
+  if (item.tp.tabs?.length && (showPaths || tabEdit) && !item.replanning) {
     const tl = item.cfg.tabs?.length || 0.5, tw = Math.max(0.3, item.cfg.tool.dia * 1.6);
     item.tp.tabs.forEach((t, k) => {
       svg += `<g class="tabmark" data-k="${k}" transform="translate(${t.x.toFixed(3)} ${fy(t.y).toFixed(3)}) rotate(${(-t.a * 180 / Math.PI).toFixed(2)})"><rect x="${-tl / 2}" y="${-tw / 2}" width="${tl}" height="${tw}"><title>Tab${sh.tabsManual ? ' (placed by hand)' : ''}${tabEdit ? ' · drag to move, right-click to remove' : ''}</title></rect>${tabEdit ? '<circle class="tabhit" r="1"/>' : ''}</g>`;
@@ -974,7 +1081,8 @@ function renderSheet(item) {
   if (sim) for (const c of sim.result.cells.slice(0, 300)) svg += `<circle class="simbad ${c.kind}" cx="${((c.i + 0.5) * sim.res).toFixed(3)}" cy="${fy((c.j + 0.5) * sim.res).toFixed(3)}" r="0.3"><title>${c.kind === 'uncut' ? 'left uncut' : c.kind === 'deep' ? 'cut deeper than the model' : c.kind === 'screw' ? 'cut too close to a screw' : 'outline not cut through'}</title></circle>`;
   svg += `<circle class="origin" cx="0" cy="${H}" r="0.5"/>`;
   svg += '</svg>';
-  const simNote = !sim ? '' : sim.result.ok
+  const simNote = item.replanning ? '<p class="small muted">Re-planning this sheet\'s toolpaths…</p>'
+    : !sim ? (showSim ? '<p class="small muted">Check cut: carving the sheet…</p>' : '') : sim.result.ok
     ? '<p class="small sim-ok">Check cut: every floor cut to depth, nothing deeper than the model' + (['tabs', 'none'].includes(holdDownOf(item.cfg)) ? ', every outline cut through except at tabs' : '') + '.</p>'
     : `<p class="small sim-bad">Check cut: ${[sim.result.uncut && `${sim.result.uncut} spots left uncut (yellow)`, sim.result.deep && `${sim.result.deep} spots cut deeper than the model (red)`, sim.result.notThrough && `${sim.result.notThrough} spots of outline not cut through (pink)`, sim.result.screw && `${sim.result.screw} spots cut inside a screw's clearance (blue)`].filter(Boolean).join(' · ')}. Check before cutting.</p>`;
 
@@ -1053,11 +1161,17 @@ function setSheetTabs(item, list) {
   else delete m[item.idx];
   if (!Object.keys(m).length) delete job.manualTabs[item.mkey];
   item.sheet.tabsManual = list ? m[item.idx] : undefined;
-  item.tp = sheetToolpaths(item.sheet, item.cfg);
-  item.screwChk = screwsShown(item.cfg, item.sheet) ? screwCheck(item.sheet, item.tp.moves, item.cfg) : [];
-  item.text = null;
-  item.sim = null;
-  renderResults();
+  replanSheet(item);
+}
+// Runs a pointermove handler at most once per animation frame, with the latest
+// event; flush() runs a waiting one at once (before the release is handled).
+function perFrame(fn) {
+  let ev = null;
+  let raf = 0;
+  const run = () => { raf = 0; const x = ev; ev = null; if (x) fn(x); };
+  const h = (e) => { ev = e; if (!raf) raf = requestAnimationFrame(run); };
+  h.flush = () => { if (raf) { cancelAnimationFrame(raf); run(); } };
+  return h;
 }
 function wireTabEdit(item, svgEl, fy) {
   const at = (e) => {
@@ -1073,6 +1187,7 @@ function wireTabEdit(item, svgEl, fy) {
   let drag = null;
   svgEl.addEventListener('contextmenu', (e) => {
     e.preventDefault();
+    if (item.replanning) return;   // tabs follow the toolpaths being redone
     const g = e.target.closest('g.tabmark');
     if (!g) return;
     const l = list();
@@ -1083,6 +1198,7 @@ function wireTabEdit(item, svgEl, fy) {
   svgEl.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
+    if (item.replanning) return;   // tabs follow the toolpaths being redone
     if (!okOpt) { tabMsg = '!Set a tab length and thickness on the Cutting card first.'; renderResults(); return; }
     const g = e.target.closest('g.tabmark');
     if (g) { drag = { k: +g.dataset.k, g, l: list(), moved: false }; svgEl.setPointerCapture(e.pointerId); return; }
@@ -1092,7 +1208,8 @@ function wireTabEdit(item, svgEl, fy) {
     tabMsg = h.on.length > 1 ? 'On a shared line: the tab holds both parts.' : '';
     setSheetTabs(item, [...list(), { x: h.c[0], y: h.c[1] }]);
   });
-  svgEl.addEventListener('pointermove', (e) => {
+  // one update per frame however fast the mouse reports (flushed on release)
+  const onMove = perFrame((e) => {
     if (!drag) return;
     const h = snap(at(e));
     if (!h || h.short) return;
@@ -1103,7 +1220,9 @@ function wireTabEdit(item, svgEl, fy) {
     const a = Math.atan2(h.on[0].span[1][1] - h.on[0].span[0][1], h.on[0].span[1][0] - h.on[0].span[0][0]);
     drag.g.setAttribute('transform', tr.replace(/rotate\([^)]*\)/, `rotate(${(-a * 180 / Math.PI).toFixed(2)})`));
   });
+  svgEl.addEventListener('pointermove', onMove);
   const end = () => {
+    onMove.flush();
     if (!drag) return;
     const d = drag;
     drag = null;
@@ -1131,11 +1250,7 @@ function refreshSheet(item) {
   const rmin = { side: job.settings.remnants?.minSide ?? 8, area: job.settings.remnants?.minArea ?? 288 };
   applyMoves(item.sheet, job.manualMoves?.[item.mkey]?.[item.idx], { gap: item.cfg.commonLine ? item.cfg.tool.dia : item.cfg.sheet.spacing, remnantMin: rmin,
     edits: job.layoutEdits?.[item.mkey]?.[item.idx], partOf: (k) => item.group.parts.find((p) => partKey(p) === k) });
-  item.tp = sheetToolpaths(item.sheet, item.cfg);
-  item.screwChk = screwsShown(item.cfg, item.sheet) ? screwCheck(item.sheet, item.tp.moves, item.cfg) : [];
-  item.text = null;
-  item.sim = null;
-  renderResults();
+  replanSheet(item);
 }
 
 // ---------- copy, paste and delete parts on a sheet ----------
@@ -1320,7 +1435,8 @@ function wireMoveEdit(item, svgEl, fy) {
     drag = { i, pl, g, room, start: at(e), fit: null, ghost };
     svgEl.setPointerCapture(e.pointerId);
   });
-  svgEl.addEventListener('pointermove', (e) => {
+  // one update per frame however fast the mouse reports (flushed on release)
+  const onMove = perFrame((e) => {
     if (!drag) return;
     const p = at(e);
     const dx = p.x - drag.start.x, dy = p.y - drag.start.y;
@@ -1331,7 +1447,9 @@ function wireMoveEdit(item, svgEl, fy) {
     drag.ghost.style.display = f.ok && f.snapped ? '' : 'none';
     if (f.ok && f.snapped) drag.ghost.setAttribute('transform', `translate(${f.dx} ${-f.dy})`);
   });
+  svgEl.addEventListener('pointermove', onMove);
   const end = () => {
+    onMove.flush();
     if (!drag) return;
     const d = drag;
     drag = null;
@@ -1394,7 +1512,8 @@ function wireScrewEdit(item, svgEl, fy) {
     drag = { k, l, g, moved: false };
     svgEl.setPointerCapture(e.pointerId);
   });
-  svgEl.addEventListener('pointermove', (e) => {
+  // one update per frame however fast the mouse reports (flushed on release)
+  const onMove = perFrame((e) => {
     if (!drag) return;
     const m = at(e), f = room().fit(m.x, m.y);
     const p = f.ok ? { x: f.x, y: f.y } : m;
@@ -1405,7 +1524,9 @@ function wireScrewEdit(item, svgEl, fy) {
     const c = screwCheck({ ...sh, screws: [p] }, item.tp.moves, item.cfg)[0];
     drag.g.classList.toggle('bad', !c.ok);
   });
+  svgEl.addEventListener('pointermove', onMove);
   const end = () => {
+    onMove.flush();
     if (!drag) return;
     const d = drag;
     drag = null;
