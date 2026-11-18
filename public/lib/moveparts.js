@@ -21,6 +21,21 @@ export function moveBy(pl, dx, dy) {
   return out;
 }
 
+/**
+ * A custom shape (a placement with xf) turned to `deg` degrees about the middle
+ * of its box: a new object, marked moved and turned. (Turned over parts stay
+ * turned over.)
+ */
+export function turnTo(pl, deg) {
+  const a = (deg * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a), m = pl.xf.m ? -1 : 1;
+  const q = pl.part.outline.map(([x, y]) => [c * x - s * m * y, s * x + c * m * y]);
+  const minx = Math.min(...q.map((v) => v[0])), maxx = Math.max(...q.map((v) => v[0]));
+  const miny = Math.min(...q.map((v) => v[1])), maxy = Math.max(...q.map((v) => v[1]));
+  const cx = (pl.box.x0 + pl.box.x1) / 2, cy = (pl.box.y0 + pl.box.y1) / 2;
+  const w = maxx - minx, h = maxy - miny, x0 = cx - w / 2, y0 = cy - h / 2;
+  return { ...pl, x: x0, y: y0, angle: deg, xf: { ...pl.xf, a: deg, tx: x0 - minx, ty: y0 - miny }, box: { x0, y0, x1: x0 + w, y1: y0 + h }, moved: true, turned: true };
+}
+
 /** Usable stock rectangles of a sheet (inch, x0..x1, y0..y1). */
 export function usableRects(sheet) {
   const tx = sheet.trimX ?? sheet.trim, t = sheet.trim;
@@ -92,8 +107,8 @@ export function moveRoom(sheet, index, o) {
 }
 
 /**
- * Hand changes applied to a sheet: moves = { [part id # copy]: { x, y } } (where
- * the placement's x, y go); edits = { removed: [part id # copy], added: [placement
+ * Hand changes applied to a sheet: moves = { [part id # copy]: { x, y, a } } (where
+ * the placement's x, y go; a = the angle a custom shape was turned to by hand); edits = { removed: [part id # copy], added: [placement
  * records] } (parts deleted from / pasted onto this sheet by hand; an added
  * record is { partId, copy, label, cabinet, x, y, rotated, xf, box }, resolved
  * to a part with partOf(id)). Offcuts that moved or added parts now sit on are
@@ -116,7 +131,8 @@ export function applyMoves(sheet, moves, { gap = 0, remnantMin, edits = null, pa
     const m = moves?.[moveKey(pl)];
     if (!m) return pl;
     n++;
-    return moveBy(pl, m.x - pl.x, m.y - pl.y);
+    const t = m.a != null && pl.xf ? turnTo(pl, m.a) : pl;
+    return moveBy(t, m.x - t.x, m.y - t.y);
   });
   sheet.partsMoved = n;
   sheet.partsAdded = added.length;

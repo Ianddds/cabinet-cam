@@ -9,7 +9,7 @@ import { DEFAULT_LIBRARY, TOOL_FIELDS, newTool, resolveTools } from './lib/tools
 import { cutListRows, cutListCSV, fraction, roleName } from './lib/cutlist.js';
 import { layoutsHTML } from './lib/printsheets.js';
 import { constructionHTML } from './lib/construction.js';
-import { moveRoom, applyMoves, moveKey, copyAt, partKey, screwRoom } from './lib/moveparts.js';
+import { moveRoom, turnTo, applyMoves, moveKey, copyAt, partKey, screwRoom } from './lib/moveparts.js';
 import { sheetLabels, remnantLabel, toZPL, labelSVG, numberPlacements } from './lib/labels.js';
 import { GRAIN_CHOICES, grainLabel, effectiveGrain, applyGrain, splitPart, carryOverrides, roleKey } from './lib/grain.js';
 
@@ -38,7 +38,7 @@ function markStale() {
 function showStale() {
   $('#staleBar').hidden = !stale;
   // files, layouts and labels from out-of-date sheets would be wrong
-  const busy = results.some((r) => r.sheets.some((x) => x.replanning));   // a sheet's toolpaths are being redone
+  const busy = results.some((r) => r.sheets.some((x) => x.replanning || x.replanError));   // a sheet's toolpaths are being redone
   const off = stale || busy || !!results.pendingShapes;
   for (const id of ['#saveFilesBtn', '#saveFilesMore']) $(id).disabled = off;
   $('#printMenuBtn').disabled = stale || busy;
@@ -582,7 +582,7 @@ function shapesFor(nest, g, nestOpts) {
         const win = good.reduce((b, a) => (!b || better(a.spots.cost, b.spots.cost) || (!better(b.spots.cost, a.spots.cost) && a.spots.pass < b.spots.pass) ? a : b), null);
         shapeMemo.set(key, win ? { spots: win.spots } : { error: err?.error || 'no answer' });
         if (shapeMemo.size > 40) shapeMemo.delete(shapeMemo.keys().next().value);
-        if (results.length) runNest();   // lay the sheets out again, now with the shapes (and any changes waiting)
+        if (results.length || nestActive) runNest();   // lay the sheets out again, now with the shapes (and any changes waiting)
       };
       wk.onerror = (e) => { wk.onmessage({ data: { id, error: e.message || 'shape worker failed' } }); };
       return { wk, passes };
@@ -622,19 +622,24 @@ async function searchNests(force = false) {
   if (!job.cut && commitPending()) { moveMsg = ''; renderParts(); }
   const groups = nestGroups();
   job.nests = job.nests || {};
-  if (job.cut) { showMessages([{ text: 'This job is marked as cut, so its layout is fixed. Undo "cut" to nest it again.' }]); runNest(); return; }
+  if (job.cut) { showMessages([{ text: 'This job is marked as cut, so its layout is fixed. Undo "cut" to nest it again.' }]); await runNest(); return; }
   // search what has never been searched, or whose remnants on the rack changed
   const todo = groups.filter((x) => force || !job.nests[x.key]?.searched || stockSig(job.nests[x.key].stock) !== stockSig(x.stock));
-  if (!todo.length) { runNest(); return; }
+  if (!todo.length) { await runNest(); return; }
   const btns = [$('#nestBtn'), $('#searchAgain')];
   btns.forEach((b) => { b.disabled = true; });
   const t0 = Date.now();
   const best = {};
+  const budget = Math.max(1, (job.settings.nestSeconds ?? 6) * 1000);
+  busyPop.start(`Nesting ${todo.length} material${todo.length === 1 ? '' : 's'}…`, 'Trying layouts');
   const status = () => {
     const sheets = todo.map((x) => best[x.key]).filter((v) => v != null);
-    $('#nestBtn').textContent = `Nesting… ${Math.round((Date.now() - t0) / 1000)}s` + (sheets.length ? ` · ${sheets.reduce((a, v) => a + v, 0)} full sheets` : '');
+    const secs = Math.round((Date.now() - t0) / 1000);
+    $('#nestBtn').textContent = `Nesting… ${secs}s` + (sheets.length ? ` · ${sheets.reduce((a, v) => a + v, 0)} full sheets` : '');
+    // the search runs for its time budget; past that it's finishing up
+    busyPop.set(Math.min(0.97, (Date.now() - t0) / budget), `${secs}s · trying layouts` + (sheets.length ? ` · best so far ${sheets.reduce((a, v) => a + v, 0)} full sheet${sheets.reduce((a, v) => a + v, 0) === 1 ? '' : 's'}` : ''));
   };
-  const timer = setInterval(status, 500);
+  const timer = setInterval(status, 250);
   // every core: each material gets its share of searches side by side (different
   // seeds), and the best of them is kept; one core is left for the page
   const perGroup = Math.max(1, Math.floor(CORES / todo.length));
@@ -658,16 +663,90 @@ async function searchNests(force = false) {
     $('#nestBtn').textContent = 'Nest & toolpath';
     btns.forEach((b) => { b.disabled = false; });
   }
-  runNest();
+  await runNest();
 }
 
-function runNest() {
-  stale = false;
+// The busy popup: a title, a bar (a fraction, or null = still working, no
+// estimate) and a note. Shown a moment after start so quick jobs don't flash it.
+const busyPop = (() => {
+  let t = null;
+  let on = false;
+  return {
+    start(title, note) {
+      $('#busyTitle').textContent = title;
+      busyPop.set(null, note || '');
+      if (on) return;
+      on = true;
+      clearTimeout(t);
+      t = setTimeout(() => { if (on) $('#busy').hidden = false; }, 250);
+    },
+    set(frac, note) {
+      const f = $('#busyFill');
+      f.classList.toggle('indet', frac == null);
+      f.style.width = frac == null ? '' : `${Math.round(Math.min(1, Math.max(0, frac)) * 100)}%`;
+      if (note != null) $('#busyNote').textContent = note;
+    },
+    stop() { on = false; clearTimeout(t); $('#busy').hidden = true; },
+  };
+})();
+
+// Every sheet's toolpaths, worked out in workers (toolpath-worker.js) on all
+// cores, reporting each sheet as it's done. A sheet a worker can't do is planned
+// here instead. jobs: [{ sheet, cfg, checkScrews }] -> [{ tp, chk } | { error }]
+async function planSheets(jobs, onDone) {
+  const out = new Array(jobs.length);
+  let next = 0;
+  let done = 0;
+  const here = (k) => {
+    try {
+      const tp = sheetToolpaths(jobs[k].sheet, jobs[k].cfg);
+      return { tp, chk: jobs[k].checkScrews ? screwCheck(jobs[k].sheet, tp.moves, jobs[k].cfg) : [] };
+    } catch (err) { return { error: String(err?.message || err) }; }
+  };
+  const lane = async () => {
+    let w = null;
+    try { w = new Worker(new URL('./lib/toolpath-worker.js', import.meta.url), { type: 'module' }); } catch { w = null; }
+    while (next < jobs.length) {
+      const k = next++;
+      let r = null;
+      if (w) {
+        r = await new Promise((resolve) => {
+          w.onmessage = (e) => resolve(e.data);
+          w.onerror = (e) => { e.preventDefault?.(); resolve({ error: e.message || 'worker failed', dead: true }); };
+          try { w.postMessage({ id: k, sheet: jobs[k].sheet, cfg: jobs[k].cfg, checkScrews: jobs[k].checkScrews }); } catch (err) { resolve({ error: String(err?.message || err) }); }
+        });
+        if (r.dead) { w.terminate(); w = null; }
+      }
+      if (!r || r.error) {
+        if (r?.error) console.warn('toolpath worker:', r.error);
+        await new Promise((res) => setTimeout(res, 0));   // let the popup paint first
+        r = here(k);
+      }
+      out[k] = r;
+      done += 1;
+      onDone?.(done, jobs.length);
+    }
+    w?.terminate();
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(jobs.length, CORES)) }, lane));
+  return out;
+}
+
+let nestRun = 0;
+let nestActive = 0;   // runs under way (the sheets aren't in results till one finishes)
+async function runNest() {
+  const run = ++nestRun;
+  nestActive += 1;
+  busyPop.start('Planning toolpaths…');
+  try { await runNestNow(run); } finally { nestActive -= 1; if (run === nestRun) busyPop.stop(); }
+}
+async function runNestNow(run) {
   const s = job.settings;
   const tl = resolveTools(s, library, job.toolSnapshot || []);
   const problems = settingsProblems(s, tl);
   if (problems.some((p) => p.includes('above zero') || p.startsWith('No profile tool'))) { showMessages([{ error: true, text: 'Fix tools:', items: problems }]); return; }
-  results = [];
+  const res = [];   // becomes results once every sheet is planned (the old ones show till then)
+  const toPlan = [];
   if (String(s.post).startsWith('pp:') && !postPP(s)) { showMessages([{ error: true, text: `The post file "${s.post.slice(3)}" isn't in the posts folder any more — pick another post (Machine card).` }]); return; }
   const ext = fileExtension({ ...s, pp: postPP(s) });
   const stamp = (job.name || 'job').replace(/[^\w-]+/g, '_').slice(0, 40);
@@ -696,24 +775,38 @@ function runNest() {
       applyMoves(sheet, job.manualMoves?.[mkey]?.[i], { gap: cfg.commonLine ? cfg.tool.dia : cfg.sheet.spacing, remnantMin: nestOpts.remnantMin, edits: job.layoutEdits?.[mkey]?.[i], partOf: (k) => g.parts.find((p) => partKey(p) === k) });
       applyManualScrews(sheet, job.manualScrews?.[mkey]?.[i]);
       sheet.tabsManual = job.manualTabs?.[mkey]?.[i] || undefined;
-      const tp = sheetToolpaths(sheet, cfg);
       const rno = sheet.remnant && (remnants.find((r) => r.id === sheet.remnant.id)?.no ?? nestOpts.remnants.find((r) => r.id === sheet.remnant.id)?.no ?? kept?.stock?.find((r) => r.id === sheet.remnant.id)?.no);
       sheet.remnant && (sheet.remnant.no = rno);
       const what = sheet.remnant ? `remnant R${rno ?? '?'}` : `sheet ${i + 1} of ${nest.sheets.length}`;
       const title = `${job.name || 'Job'} | ${g.key} | ${what}`;
-      const chk = screwsShown(cfg, sheet) ? screwCheck(sheet, tp.moves, cfg) : [];
-      const bad = chk.filter((c) => !c.ok).length;
-      if (bad) stockNotes.push(`${g.key} ${what}: ${bad} hold-down screw${bad === 1 ? ' is' : 's are'} in a bad spot (red) — move ${bad === 1 ? 'it' : 'them'} before cutting`);
       if (s.screws?.on && !sheet.screwsManual && sheet.screwsMissing) stockNotes.push(`${g.key} ${what}: room for only ${sheet.screws.length} of 5 hold-down screws — hold the rest of the sheet another way`);
       if (s.screws?.on && !sheet.screwsManual && sheet.screwsInKeeper) stockNotes.push(`${g.key} ${what}: ${sheet.screwsInKeeper} hold-down screw${sheet.screwsInKeeper === 1 ? '' : 's'} had to go in the offcut being kept (no scrap in that part of the sheet) — it will have the hole${sheet.screwsInKeeper === 1 ? '' : 's'}`);
       // sheet numbers padded (S01 … S10 sort right everywhere); see nameFiles for the screw-file pair
       const nw = Math.max(2, String(nest.sheets.length).length);
-      const item = { sheet, tp, cfg, title, mkey, idx: i, screwChk: chk, base: `${stamp}_${mat}_${g.thickness.toFixed(3)}_${sheet.remnant ? 'R' + (rno ?? 'x') : 'S' + String(i + 1).padStart(nw, '0')}`, ext, text: null, group: g };
-      nameFiles(item);
+      const item = { sheet, tp: null, cfg, title, mkey, idx: i, screwChk: [], base: `${stamp}_${mat}_${g.thickness.toFixed(3)}_${sheet.remnant ? 'R' + (rno ?? 'x') : 'S' + String(i + 1).padStart(nw, '0')}`, ext, text: null, group: g };
+      toPlan.push({ item, label: `${g.key} ${what}` });
       return item;
     });
-    results.push({ group: g, sheets, unplaced: nest.unplaced, lowerBound: nest.stats?.lowerBound });
+    res.push({ group: g, sheets, unplaced: nest.unplaced, lowerBound: nest.stats?.lowerBound });
   }
+  // toolpaths for every sheet, off the page's thread, with the count in the popup
+  busyPop.set(0, `0 of ${toPlan.length} sheets`);
+  const planned = await planSheets(toPlan.map(({ item }) => ({ sheet: item.sheet, cfg: item.cfg, checkScrews: screwsShown(item.cfg, item.sheet) })),
+    (n, of) => { if (run === nestRun) busyPop.set(n / of, `${n} of ${of} sheets`); });
+  if (run !== nestRun) return;   // a newer run started meanwhile: it shows its own
+  const failed = [];
+  toPlan.forEach(({ item, label }, k) => {
+    const r = planned[k];
+    if (r.error) { failed.push(`${label}: ${r.error}`); return; }
+    item.tp = r.tp;
+    item.screwChk = r.chk;
+    nameFiles(item);
+    const bad = r.chk.filter((c) => !c.ok).length;
+    if (bad) stockNotes.push(`${label}: ${bad} hold-down screw${bad === 1 ? ' is' : 's are'} in a bad spot (red) — move ${bad === 1 ? 'it' : 'them'} before cutting`);
+  });
+  if (failed.length) { showMessages([{ error: true, text: 'Toolpaths could not be planned for:', items: failed }]); return; }
+  results = res;
+  stale = false;
   results.quick = quick;
   results.pendingShapes = pendingShapes;
   const all = results.flatMap((r) => r.sheets);
@@ -766,7 +859,7 @@ function toolpathWorker() {
     const p = pending.get(e.data.id);
     pending.delete(e.data.id);
     if (!p) return;
-    if (e.data.error) p.sync(); else p.done(e.data.tp, e.data.chk);
+    if (e.data.error) { console.warn('toolpath worker:', e.data.error); p.sync(); } else p.done(e.data.tp, e.data.chk);
   };
   w.onerror = (e) => {
     e.preventDefault?.();
@@ -787,6 +880,7 @@ function replanSheet(item) {
   item.sim = null;
   const done = (tp, chk) => {
     if (item.replanId !== id) return;   // a newer edit's plan is on its way
+    item.replanError = null;
     item.tp = tp;
     nameFiles(item);
     item.screwChk = chk;
@@ -798,9 +892,27 @@ function replanSheet(item) {
   };
   const sync = () => {
     if (item.replanId !== id) return;
-    const tp = sheetToolpaths(item.sheet, item.cfg);
-    done(tp, screwsShown(item.cfg, item.sheet) ? screwCheck(item.sheet, tp.moves, item.cfg) : []);
+    try {
+      const tp = sheetToolpaths(item.sheet, item.cfg);
+      done(tp, screwsShown(item.cfg, item.sheet) ? screwCheck(item.sheet, tp.moves, item.cfg) : []);
+    } catch (err) {
+      // the plan itself failed: say so on the sheet instead of waiting forever
+      console.error('re-plan failed', err);
+      item.replanning = false;
+      item.replanError = String(err?.stack || err?.message || err);
+      renderResults();
+    }
   };
+  // never wait forever: a plan that takes over a minute is stopped and reported
+  setTimeout(() => {
+    if (item.replanId !== id || !item.replanning) return;
+    const wk = tpWorker;
+    tpWorker = null;
+    if (wk) { wk.pending.delete(id); wk.w.terminate(); for (const p of wk.pending.values()) p.sync(); }   // other sheets waiting on it: plan here
+    item.replanning = false;
+    item.replanError = 'Re-planning took over a minute and was stopped.';
+    renderResults();
+  }, 60000);
   try {
     const wk = toolpathWorker();
     wk.pending.set(id, { done, sync });
@@ -1033,6 +1145,16 @@ function renderSheet(item) {
     svg += `<text class="partno" x="${g.box.x0 + 0.5}" y="${fy(g.box.y1) + 1.6}">#${partNo.get(pl)}</text>`;
     svg += '</g>';
   });
+  // custom shapes: a handle to turn each one, drawn over everything so another
+  // part can't cover it; just above the part, or below it at the top of the sheet
+  if (moveEdit) item.sheet.placements.forEach((pl, idx) => {
+    if (!pl.xf) return;
+    const b = pl.box;
+    const hx = (b.x0 + b.x1) / 2;
+    const above = b.y1 + 2.2 <= H;
+    const y0 = above ? b.y1 : b.y0, y1 = above ? b.y1 + 2.2 : b.y0 - 2.2;
+    svg += `<g class="rot-handle" data-i="${idx}"><line x1="${hx}" y1="${fy(y0)}" x2="${hx}" y2="${fy(y1)}"/><circle cx="${hx}" cy="${fy(y1)}" r="0.75"><title>Drag to turn ${esc(pl.label || pl.part.name)}${pl.turned ? ` (turned by hand to ${Math.round(pl.xf.a)}°)` : ''}</title></circle></g>`;
+  });
   if (showPaths && !item.replanning) {
     let cut = '', rapid = '', tab = '', prev = null;
     for (const m of item.tp.moves) {
@@ -1081,7 +1203,8 @@ function renderSheet(item) {
   if (sim) for (const c of sim.result.cells.slice(0, 300)) svg += `<circle class="simbad ${c.kind}" cx="${((c.i + 0.5) * sim.res).toFixed(3)}" cy="${fy((c.j + 0.5) * sim.res).toFixed(3)}" r="0.3"><title>${c.kind === 'uncut' ? 'left uncut' : c.kind === 'deep' ? 'cut deeper than the model' : c.kind === 'screw' ? 'cut too close to a screw' : 'outline not cut through'}</title></circle>`;
   svg += `<circle class="origin" cx="0" cy="${H}" r="0.5"/>`;
   svg += '</svg>';
-  const simNote = item.replanning ? '<p class="small muted">Re-planning this sheet\'s toolpaths…</p>'
+  const simNote = item.replanError ? `<p class="small sim-bad">This sheet's toolpaths couldn't be re-planned after the last edit, so the ones shown are from before it. Undo the edit (or Put all back / Back to automatic) and send this to Claude:<br><code style="white-space:pre-wrap">${esc(item.replanError.slice(0, 600))}</code></p>`
+    : item.replanning ? '<p class="small muted">Re-planning this sheet\'s toolpaths…</p>'
     : !sim ? (showSim ? '<p class="small muted">Check cut: carving the sheet…</p>' : '') : sim.result.ok
     ? '<p class="small sim-ok">Check cut: every floor cut to depth, nothing deeper than the model' + (['tabs', 'none'].includes(holdDownOf(item.cfg)) ? ', every outline cut through except at tabs' : '') + '.</p>'
     : `<p class="small sim-bad">Check cut: ${[sim.result.uncut && `${sim.result.uncut} spots left uncut (yellow)`, sim.result.deep && `${sim.result.deep} spots cut deeper than the model (red)`, sim.result.notThrough && `${sim.result.notThrough} spots of outline not cut through (pink)`, sim.result.screw && `${sim.result.screw} spots cut inside a screw's clearance (blue)`].filter(Boolean).join(' · ')}. Check before cutting.</p>`;
@@ -1106,7 +1229,7 @@ function renderSheet(item) {
       <label class="check inline small" title="Carve the toolpath into the sheet and check it against the model: every floor cut to depth, nothing deeper than the model, outlines cut through (with tabs). Yellow = left uncut, red = too deep, pink = not cut through."><input type="checkbox" id="showSim" ${showSim ? 'checked' : ''}> Check cut</label>
       <span class="legend"><span><i style="background:var(--path)"></i>cut</span><span><i style="background:var(--rapid)"></i>rapid</span><span><i style="background:var(--pocket)"></i>dado</span><span><i style="background:var(--drill)"></i>drill</span>${usesTabs(item.cfg) ? '<span><i style="background:var(--tab)"></i>tab</span>' : ''}</span>
     </div>
-    ${moveEdit ? `<p class="small screw-help">Moving parts: drag a part where you want it. If it would come too close to another part's cut, a hold-down screw or the edge of the stock, it goes to the nearest spot where it fits (dashed outline while dragging). Right-click a part to copy, delete or put it back; right-click a spot to paste. ${sh.partsMoved || 0} moved${sh.partsAdded ? `, ${sh.partsAdded} pasted` : ''}${sh.partsRemoved ? `, ${sh.partsRemoved} deleted` : ''} on this sheet. <button id="moveReset" ${sh.partsMoved ? '' : 'disabled'}>Put all back</button>${moveMsg ? `<br><span class="${moveMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(moveMsg.replace(/^!/, ''))}</span>` : ''}${job.pendingQty && Object.keys(job.pendingQty).length ? '<br><strong>Parts added or deleted: Nest &amp; toolpath nests again with the new counts.</strong> Until then deleted parts leave their spot empty and pasted ones stay where you put them.' : ''}</p>` : ''}
+    ${moveEdit ? `<p class="small screw-help">Moving parts: drag a part where you want it. A custom shape has a round handle above it: drag the handle to turn the part (in the custom-shape steps, or a half turn when its grain is set; hold Shift for single degrees). If it would come too close to another part's cut, a hold-down screw or the edge of the stock, it goes to the nearest spot where it fits (dashed outline while dragging). Right-click a part to copy, delete or put it back; right-click a spot to paste. ${sh.partsMoved || 0} moved${sh.partsAdded ? `, ${sh.partsAdded} pasted` : ''}${sh.partsRemoved ? `, ${sh.partsRemoved} deleted` : ''} on this sheet. <button id="moveReset" ${sh.partsMoved ? '' : 'disabled'}>Put all back</button>${moveMsg ? `<br><span class="${moveMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(moveMsg.replace(/^!/, ''))}</span>` : ''}${job.pendingQty && Object.keys(job.pendingQty).length ? '<br><strong>Parts added or deleted: Nest &amp; toolpath nests again with the new counts.</strong> Until then deleted parts leave their spot empty and pasted ones stay where you put them.' : ''}</p>` : ''}
     ${tabEdit ? `<p class="small screw-help">Placing tabs: click near a part's edge to add a tab there (it goes on the bit's path, along that edge, clear of the corners; on a line two parts share it holds both), drag one to move it, right-click to remove it. ${item.tp.tabs?.length || 0} on this sheet${sh.tabsManual ? ' (placed by hand: parts without one get none)' : ''}. <button id="tabAuto" ${sh.tabsManual ? '' : 'disabled'}>Back to automatic</button> <button id="tabClear" ${item.tp.tabs?.length ? '' : 'disabled'}>Remove all</button>${tabMsg ? `<br><span class="${tabMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(tabMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
     ${screwEdit ? `<p class="small screw-help">Placing screws: click an empty spot to add one, drag to move, right-click to remove. A screw dropped too close to a cut goes to the nearest spot clear of it. Red = a cut or part is too close. ${sh.screws?.length || 0} on this sheet${sh.screwsManual ? ' (placed by hand)' : ''}. <button id="screwAuto" ${sh.screwsManual ? '' : 'disabled'}>Back to automatic</button> <button id="screwClear" ${sh.screws?.length ? '' : 'disabled'}>Remove all</button>${screwMsg ? `<br><span class="${screwMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(screwMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
     ${svg}
@@ -1399,8 +1522,33 @@ function wireMoveEdit(item, svgEl, fy) {
   };
   const current = () => {
     const m = {};
-    for (const pl of sh.placements) if (pl.moved) m[moveKey(pl)] = { x: +pl.x.toFixed(4), y: +pl.y.toFixed(4) };
+    for (const pl of sh.placements) if (pl.moved) m[moveKey(pl)] = { x: +pl.x.toFixed(4), y: +pl.y.toFixed(4), ...(pl.turned ? { a: +pl.xf.a.toFixed(3) } : {}) };
     return m;
+  };
+  // the angle a custom shape can be turned to, nearest the one wanted: grain along
+  // or across the part allows a half turn only (the grain still runs the same
+  // way); free grain turns in the custom-shape step (Shift: any whole degree)
+  const snapTurn = (pl, want, free) => {
+    const norm = (a) => ((a % 360) + 360) % 360;
+    const grain = job.settings.respectGrain !== false ? pl.part.grain : 'none';
+    const pick = (list) => list.reduce((b, a) => (Math.abs(((norm(want - a) + 180) % 360) - 180) < Math.abs(((norm(want - b) + 180) % 360) - 180) ? a : b));
+    if (grain === 'length') return pick([0, 180]);
+    if (grain === 'width') return pick([90, 270]);
+    const step = free ? 1 : (job.settings.shapeStep || 15);
+    return norm(Math.round(want / step) * step);
+  };
+  // drop a turn: the turned part where it is, or the nearest spot it fits
+  const endTurn = (d) => {
+    if (Math.abs(((d.deg - d.a0 + 540) % 360) - 180) < 1e-6) { renderResults(); return; }
+    const t = turnTo(d.pl, d.deg);
+    const trial = { ...sh, placements: sh.placements.map((q, k) => (k === d.i ? t : q)) };
+    const room = moveRoom(trial, d.i, { gap: (q) => partGap(item.cfg, t, q), screws: d.screws, screwClear: screwR(item.cfg.screws || {}) + item.cfg.tool.dia });
+    const f = room.fit(0, 0);
+    if (!f.ok) { moveMsg = `!No room to turn ${d.pl.label || d.pl.part.name} to ${Math.round(d.deg)}° near there.`; renderResults(); return; }
+    moveMsg = f.snapped ? `Turned to ${Math.round(d.deg)}° and moved to the nearest spot where it fits.` : `Turned to ${Math.round(d.deg)}°.`;
+    const m = current();
+    m[moveKey(d.pl)] = { x: +(t.x + f.dx).toFixed(4), y: +(t.y + f.dy).toFixed(4), a: +d.deg.toFixed(3) };
+    setSheetMoves(item, m);
   };
   let drag = null;
   svgEl.addEventListener('contextmenu', (e) => {
@@ -1419,12 +1567,22 @@ function wireMoveEdit(item, svgEl, fy) {
   });
   svgEl.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
-    const g = e.target.closest('g.pl');
+    const hd = e.target.closest('g.rot-handle');
+    const g = hd ? svgEl.querySelector(`g.pl[data-i="${hd.dataset.i}"]`) : e.target.closest('g.pl');
     if (!g) return;
     e.preventDefault();
     const i = +g.dataset.i;
     const pl = sh.placements[i];
     const screws = screwsShown(item.cfg, sh) ? sh.screws || [] : [];
+    if (hd && pl.xf) {
+      // turning a custom shape: about the middle of its box, in the steps its grain allows
+      const c = { x: (pl.box.x0 + pl.box.x1) / 2, y: (pl.box.y0 + pl.box.y1) / 2 };
+      const p0 = at(e);
+      g.parentNode.appendChild(g);
+      drag = { turn: true, i, pl, g, hd, c, a0: pl.xf.a, ang0: (Math.atan2(p0.y - c.y, p0.x - c.x) * 180) / Math.PI, deg: pl.xf.a, screws };
+      svgEl.setPointerCapture(e.pointerId);
+      return;
+    }
     const room = moveRoom(sh, i, { gap: (q) => partGap(item.cfg, pl, q), screws, screwClear: screwR(item.cfg.screws || {}) + item.cfg.tool.dia });
     const ghost = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
     ghost.setAttribute('class', 'ghost');
@@ -1439,6 +1597,13 @@ function wireMoveEdit(item, svgEl, fy) {
   const onMove = perFrame((e) => {
     if (!drag) return;
     const p = at(e);
+    if (drag.turn) {
+      const ang = (Math.atan2(p.y - drag.c.y, p.x - drag.c.x) * 180) / Math.PI;
+      drag.deg = snapTurn(drag.pl, drag.a0 + ang - drag.ang0, e.shiftKey);
+      drag.g.setAttribute('transform', `rotate(${-(drag.deg - drag.a0)} ${drag.c.x} ${fy(drag.c.y)})`);
+      drag.hd.setAttribute('transform', `rotate(${-(drag.deg - drag.a0)} ${drag.c.x} ${fy(drag.c.y)})`);
+      return;
+    }
     const dx = p.x - drag.start.x, dy = p.y - drag.start.y;
     drag.g.setAttribute('transform', `translate(${dx} ${-dy})`);
     const f = drag.room.fit(dx, dy);
@@ -1453,6 +1618,7 @@ function wireMoveEdit(item, svgEl, fy) {
     if (!drag) return;
     const d = drag;
     drag = null;
+    if (d.turn) { endTurn(d); return; }
     d.ghost.remove();
     const f = d.fit;
     if (!f || !f.ok || Math.hypot(f.dx, f.dy) < 0.005) { renderResults(); return; }
