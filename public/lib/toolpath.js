@@ -1758,6 +1758,57 @@ export function fillHoleBites(pocket, circles) {
 // not always (a part whose dados already flow in one pass can do worse joined),
 // so the sheet is planned with every join, then with each join left out in
 // turn, and the fastest is kept.
+// The parts' profile paths and where their tabs go: shared by the toolpath and
+// by sheetTabs (tab markers on a sheet that has no toolpaths yet).
+function profileItems(sheet, cfg, geo, warnings, pocketsOf = () => []) {
+  const tool = cfg.tool;
+  const r = tool.dia / 2;
+  const T = cfg.thickness;
+  const loopsFor = ({ g, label }) => {
+    const out = [];
+    for (const h of g.holes) {
+      const hb = bbox(h);
+      if (Math.min(hb.w, hb.h) < tool.dia + 1e-3) { warnings.push(`${label}: cutout smaller than the profile tool — skipped`); continue; }
+      for (const inner of offset([h], -r, 'miter')) out.push(cfg.climb ? ensureCW(inner) : ensureCCW(inner));
+    }
+    const outers = offset([g.outline], r, 'miter').sort((a, b) => Math.abs(signedArea(b)) - Math.abs(signedArea(a)));
+    out.push(cfg.climb ? ensureCCW(outers[0]) : ensureCW(outers[0]));
+    return out;
+  };
+  // tabs: on parts under maxArea sq in (0 = every part); tab top = material left at the bottom
+  // hand-placed tabs (sheet.tabsManual, a list of { x, y }) take the place of the
+  // automatic ones on this sheet, and are cut even when the job holds parts another way
+  const manualTabs = Array.isArray(sheet.tabsManual) ? sheet.tabsManual : null;
+  const tabsOn = (usesTabs(cfg) || (manualTabs && manualTabs.length > 0)) && !!cfg.tabs;
+  const tabCfg = tabsOn && cfg.tabs.length > 0 && cfg.tabs.thickness > 0 && cfg.tabs.thickness < T
+    ? { ...cfg.tabs, z: -(T - cfg.tabs.thickness) } : null;
+  if (tabsOn && !tabCfg) warnings.push('Tabs are on but need a length above zero and a thickness between 0 and the material thickness — no tabs cut');
+  const items = geo.map((x, pi) => {
+    const a = Math.abs(signedArea(x.g.outline));
+    const tabs = tabCfg && (!(tabCfg.maxArea > 0) || a < tabCfg.maxArea) ? tabCfg : null;
+    return { ...x, pi, loops: loopsFor(x), area: a, tabs, center: [(x.g.box.x0 + x.g.box.x1) / 2, (x.g.box.y0 + x.g.box.y1) / 2],
+             pockets: pocketsOf(pi) };
+  });
+  if (manualTabs) placeManualTabs(items, tool, tabCfg, manualTabs, warnings);
+  else planSheetTabs(items, tool, sheet, warnings);
+  // where the tabs are (centres on the bit's path), for the sheet view
+  const tabMarks = [];
+  for (const x of items) for (const [p, q] of x.tabs?.spans || []) {
+    const c = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+    if (!tabMarks.some((m) => Math.hypot(m.x - c[0], m.y - c[1]) < 0.05)) tabMarks.push({ x: +c[0].toFixed(4), y: +c[1].toFixed(4), a: Math.atan2(q[1] - p[1], q[0] - p[0]) });
+  }
+  const tabPaths = items.map((x) => x.loops[x.loops.length - 1]);
+  return { items, tabMarks, tabPaths };
+}
+
+// Tab markers for a sheet before it has toolpaths: the same tabs the toolpath
+// will cut (automatic or hand-placed), and the bit's paths they sit on.
+export function sheetTabs(sheet, cfg) {
+  const geo = sheet.placements.map((pl) => ({ pl, g: placedGeometry(pl), label: pl.label || pl.part.name }));
+  const { tabMarks, tabPaths } = profileItems(sheet, cfg, geo, []);
+  return { tabs: tabMarks, tabPaths };
+}
+
 export function sheetToolpaths(sheet, cfg) {
   if (cfg.joinDados === false) return sheetPlan(sheet, cfg, null);
   if (cfg.joinDados === 'all') return sheetPlan(sheet, cfg, new Set());   // every join, faster or not
@@ -2130,7 +2181,12 @@ function sheetPlan(sheet, cfg, joinSkip) {
         // the bit can reach without lifting, else the nearest
         P.op = 'pocket';
         const items = [];
-        L.legPlans.forEach((lp, li) => lp.forEach((group, rank) => group.forEach((sg) => items.push({ sg, li, rank }))));
+        // a stub (a row no longer than 3 bit widths: the bit of a row left where
+        // a dado crosses a groove, past the wall pass) isn't bound by the row
+        // order: it's cut whenever the bit passes, instead of pulling it across
+        // the part and back (a back dado's two corner stubs before its long row)
+        const stubLen = cfg.stubsFree === false ? -1 : 3 * dado.dia + 1e-6;
+        L.legPlans.forEach((lp, li) => lp.forEach((group, rank) => group.forEach((sg) => items.push({ sg, li, rank, free: dist(sg[0], sg[1]) <= stubLen }))));
         // A leg's rows in places apart from each other (a groove's ends, where
         // it runs into a rabbet at each end of a drawer side) are kept in order
         // within each place, not across them: otherwise every rank goes to one
@@ -2161,12 +2217,12 @@ function sheetPlan(sheet, cfg, joinSkip) {
           let here = start, cost = 0, first = true;
           while (left.length) {
             const minRank = new Map();
-            for (const it of left) minRank.set(it.li, Math.min(minRank.get(it.li) ?? Infinity, it.rank));
+            for (const it of left) if (!it.free) minRank.set(it.li, Math.min(minRank.get(it.li) ?? Infinity, it.rank));
             // leg by leg: only the first unfinished leg in legOrder
-            const legNow = legOrder ? legOrder.find((li) => minRank.has(li)) : null;
+            const legNow = legOrder ? legOrder.find((li) => minRank.has(li) || left.some((it) => it.li === li)) : null;
             let best = null;
             left.forEach((it, k) => {
-              if (it.rank !== minRank.get(it.li) || (legNow != null && it.li !== legNow)) return;
+              if ((!it.free && it.rank !== minRank.get(it.li)) || (legNow != null && it.li !== legNow)) return;
               it.sg.forEach((e, ei) => {
                 const d = dist(e, here);
                 const sc = d + (first || d > 0.5 ? LIFT : 0);
@@ -2326,40 +2382,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
   const full = T + (cfg.overcut || 0);
   const roughTarget = skin > 0 ? T - skin : full;
 
-  const loopsFor = ({ g, label }) => {
-    const out = [];
-    for (const h of g.holes) {
-      const hb = bbox(h);
-      if (Math.min(hb.w, hb.h) < tool.dia + 1e-3) { warnings.push(`${label}: cutout smaller than the profile tool — skipped`); continue; }
-      for (const inner of offset([h], -r, 'miter')) out.push(cfg.climb ? ensureCW(inner) : ensureCCW(inner));
-    }
-    const outers = offset([g.outline], r, 'miter').sort((a, b) => Math.abs(signedArea(b)) - Math.abs(signedArea(a)));
-    out.push(cfg.climb ? ensureCCW(outers[0]) : ensureCW(outers[0]));
-    return out;
-  };
-  // tabs: on parts under maxArea sq in (0 = every part); tab top = material left at the bottom
-  // hand-placed tabs (sheet.tabsManual, a list of { x, y }) take the place of the
-  // automatic ones on this sheet, and are cut even when the job holds parts another way
-  const manualTabs = Array.isArray(sheet.tabsManual) ? sheet.tabsManual : null;
-  const tabsOn = (usesTabs(cfg) || (manualTabs && manualTabs.length > 0)) && !!cfg.tabs;
-  const tabCfg = tabsOn && cfg.tabs.length > 0 && cfg.tabs.thickness > 0 && cfg.tabs.thickness < T
-    ? { ...cfg.tabs, z: -(T - cfg.tabs.thickness) } : null;
-  if (tabsOn && !tabCfg) warnings.push('Tabs are on but need a length above zero and a thickness between 0 and the material thickness — no tabs cut');
-  const items = geo.map((x, pi) => {
-    const a = Math.abs(signedArea(x.g.outline));
-    const tabs = tabCfg && (!(tabCfg.maxArea > 0) || a < tabCfg.maxArea) ? tabCfg : null;
-    return { ...x, pi, loops: loopsFor(x), area: a, tabs, center: [(x.g.box.x0 + x.g.box.x1) / 2, (x.g.box.y0 + x.g.box.y1) / 2],
-             pockets: interleave ? plans.filter((pl) => pl.pis.includes(pi)) : [] };
-  });
-  if (manualTabs) placeManualTabs(items, tool, tabCfg, manualTabs, warnings);
-  else planSheetTabs(items, tool, sheet, warnings);
-  // where the tabs are (centres on the bit's path), for the sheet view
-  const tabMarks = [];
-  for (const x of items) for (const [p, q] of x.tabs?.spans || []) {
-    const c = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
-    if (!tabMarks.some((m) => Math.hypot(m.x - c[0], m.y - c[1]) < 0.05)) tabMarks.push({ x: +c[0].toFixed(4), y: +c[1].toFixed(4), a: Math.atan2(q[1] - p[1], q[0] - p[0]) });
-  }
-  const tabPaths = items.map((x) => x.loops[x.loops.length - 1]);
+  const { items, tabMarks, tabPaths } = profileItems(sheet, cfg, geo, warnings, (pi) => (interleave ? plans.filter((pl) => pl.pis.includes(pi)) : []));
   // Shared cut lines: where two parts' outline paths run along the same line
   // (the parts sit exactly the bit apart), that stretch is one cut. Each is
   // recorded on both parts; in each pass whichever part is cut first cuts it.
@@ -2546,18 +2569,47 @@ function sheetPlan(sheet, cfg, joinSkip) {
         if (ivo) mark(o.pi, ivo);
       }
     };
+    // Long lines first (cfg.longFirst): a part whose end butts into a longer
+    // line of a neighbour (a T) waits until that neighbour's outline is cut, so
+    // the long line runs through in one pass and the short end finishes into it.
+    const longer = new Map();   // pi -> neighbours whose edge along a shared line is longer
+    if (cfg.longFirst) for (const x of list) {
+      const ws = [];
+      for (const sp of x.shared || []) {
+        const o = items[sp.other];
+        const Lo = o.loops[o.loops.length - 1];
+        const mid = [(sp.pts[0][0] + sp.pts[1][0]) / 2, (sp.pts[0][1] + sp.pts[1][1]) / 2];
+        let edge = 0;
+        for (let i = 0; i < Lo.length; i++) {
+          const a = Lo[i], b = Lo[(i + 1) % Lo.length], l = dist(a, b);
+          if (l < 1e-6) continue;
+          const t = ((mid[0] - a[0]) * (b[0] - a[0]) + (mid[1] - a[1]) * (b[1] - a[1])) / (l * l);
+          const off = Math.abs((mid[0] - a[0]) * (b[1] - a[1]) - (mid[1] - a[1]) * (b[0] - a[0])) / l;
+          if (t > 0 && t < 1 && off < 0.005) { edge = l; break; }
+        }
+        if (edge > dist(sp.pts[0], sp.pts[1]) + 0.25 && !ws.includes(o.pi)) ws.push(o.pi);
+      }
+      if (ws.length) longer.set(x.pi, ws);
+    }
+    const waits = (x) => (longer.get(x.pi) || []).some((o) => left.has(o) && !st.get(o).cut.length);
     while (left.size) {
       const h = here();
-      let best = null;
+      let best = null, bestWait = null;
       for (const pi of left) {
         const x = items[pi];
+        const w = waits(x);
         for (const pc of leftOf(x)) {
           const S = st.get(pi);
           const cands = pc.closed ? [nearestOnLoop(S.L, h).p] : [ptAt(S, firstFwd ? pc.a : pc.b)];
-          for (const c of cands) { const d = dist(c, h); if (!best || d < best.d) best = { d, x, pc }; }
+          for (const c of cands) {
+            const d = dist(c, h);
+            if (w) { if (!bestWait || d < bestWait.d) bestWait = { d, x, pc }; }
+            else if (!best || d < best.d) best = { d, x, pc };
+          }
         }
         if (!leftOf(x).length) { startPart(x); left.delete(pi); }
       }
+      if (!best) best = bestWait;   // only parts that wait are left (a ring of them): nearest anyway
       if (!best) break;
       const { x, pc } = best;
       const S = st.get(x.pi);

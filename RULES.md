@@ -42,7 +42,8 @@ toolpath / nesting code. Every rule here is a mistake that already happened once
    are one operation; any depth order cuts the same shape (a depth not cut yet
    counts as open), so the order is picked by time. Clearing rows run along each leg (never across),
    farthest from the finished edges first — a rabbet from its open edge in to
-   its wall. Finishing passes follow finished edges only (walls, steps), through
+   its wall. Stubs (rows ≤ 3 bit widths, left where dados cross) are exempt and
+   are cut whenever the bit passes. Finishing passes follow finished edges only (walls, steps), through
    the corner reliefs, and run half the bit past any open edge. No finish
    allowance (chip clearance matters more). The cutter stays down inside a
    pocket wherever it safely can.

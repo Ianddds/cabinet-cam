@@ -1947,6 +1947,29 @@ function distSeg(p, a, b) {
   check(lastPocketM < firstProfileCut && lastDrill < firstProfileCut, `one bit: every dado and hole on the sheet before the first outline (last dado ${lastPocketM}, last hole ${lastDrill}, first outline ${firstProfileCut})`);
 }
 
+// a side with top, bottom and back dados, one 5 mm bit: the three dados run
+// without lifting (the back dado's corner stubs don't drag the bit across and back)
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const bit = { ...tl.tool, id: 't5', name: '5 mm Straight', dia: 0.197, feed: 250, stepdown: 0.185, stepover: 0.85 };
+  const rect = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  const pk = (x0, y0, x1, y1) => ({ loops: [rect(x0, y0, x1, y1)], depth: 0.26 });
+  const W = 61, D = 23.25;
+  const part = { id: 'S', name: 'S', include: true, qty: 1, grain: 'none', thickness: 0.73, width: W, height: D, outline: rect(0, 0, W, D), holes: [],
+    pockets: [pk(0.6, 0.4, 1.33, D), pk(W - 1.33, 0.4, W - 0.6, D), pk(0.6, 0.4, W - 0.6, 0.9)], material: 'T', custom: false };
+  const sheet = { w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], placements: [{ part, x: 1, y: 1, rot: 0, w: W, h: D, label: 'S' }] };
+  const mv = sheetToolpaths(sheet, { ...s0, ...tl, tool: bit, dadoTool: null, dadoSameTool: true, thickness: 0.73, holdDown: 'onion' }).moves;
+  let on = false, rap = 0, prev = null;
+  for (const m of mv) {
+    if (m.comment) { on = / pocket /.test(m.comment); continue; }
+    if (!on || m.x == null) continue;
+    if (prev && m.g === 0) rap += Math.hypot(m.x - prev.x, m.y - prev.y);
+    prev = m;
+  }
+  check(rap < 5, `side with top, bottom and back dados: ${rap.toFixed(1)}" of rapids inside the dados (was 200")`);
+}
+
 console.log(`\npocket lifts after first entry: ${liftTotal} across ${pocketTotal} pockets`);
 check(arcTotal > 20, `G-code uses arcs (${arcTotal} G2/G3 in the sample job)`);
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');

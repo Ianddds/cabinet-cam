@@ -2,7 +2,7 @@ import { DEFAULT_SETTINGS, groupParts, mergeSettings, holdDownOf, usesSkin, uses
 import { carve, check, shade } from './lib/sim.js';
 import { nestParts, applySolution, nestKey, placedGeometry, partExits, rectMinus, compareKeep } from './lib/nest.js';
 import { placeShapes, isShapePart, labelPoint, SHAPE_ORDERS } from './lib/shapes.js';
-import { sheetToolpaths, screwR, rectsOutline, screwCheck, offcutCutLines, tabOnPaths } from './lib/toolpath.js';
+import { sheetToolpaths, sheetTabs, screwR, rectsOutline, screwCheck, offcutCutLines, tabOnPaths } from './lib/toolpath.js';
 import { post, postWithWarnings, fileExtension, SBP_MAX_TOOL, toolNumberOk } from './lib/post.js';
 import { parsePP } from './lib/vpp.js';
 import { DEFAULT_LIBRARY, TOOL_FIELDS, newTool, resolveTools } from './lib/tools.js';
@@ -782,7 +782,23 @@ async function planAll() {
 // Hand edits wait for Toolpath. A moved, pasted or deleted part drops the
 // sheet's toolpaths (they no longer fit the layout); a screw or tab edit keeps
 // them on show, marked out of date (tabs need the bit's path to snap to).
+// The sheet's tabs and the bit's paths they sit on: from its toolpaths, or,
+// before Toolpath, worked out from the layout alone (the same tabs the toolpath
+// will cut), so they show and can be placed straight after Nest.
+function tabsView(item) {
+  if (item.tp) return { tabs: item.tp.tabs || [], tabPaths: item.tp.tabPaths || [] };
+  if (!item.cfg || !item.sheet) return null;
+  if (!item.tabView || item.tabViewCfg !== item.cfg || item.tabViewSheet !== item.sheet) {
+    try { item.tabView = sheetTabs(item.sheet, item.cfg); }
+    catch (err) { console.warn('tab preview failed', err); item.tabView = { tabs: [], tabPaths: [] }; }
+    item.tabViewCfg = item.cfg;
+    item.tabViewSheet = item.sheet;
+  }
+  return item.tabView;
+}
+
 function dropToolpaths(item) {
+  item.tabView = null;   // the layout changed: work the tabs out again
   item.replanId = (item.replanId || 0) + 1;   // any plan still on its way is stale
   item.replanning = false;
   item.tp = null;
@@ -1163,9 +1179,11 @@ function renderSheet(item) {
     }
   }
   // tabs: where the bit lifts to leave a bridge (hand-placed ones can be dragged in Place tabs)
-  if (item.tp?.tabs?.length && (showPaths || tabEdit) && !item.replanning) {
+  // (before Toolpath they're worked out from the layout, and always shown)
+  const tv = tabsView(item);
+  if (tv?.tabs?.length && (showPaths || tabEdit || !item.tp) && !item.replanning) {
     const tl = item.cfg.tabs?.length || 0.5, tw = Math.max(0.3, item.cfg.tool.dia * 1.6);
-    item.tp.tabs.forEach((t, k) => {
+    tv.tabs.forEach((t, k) => {
       svg += `<g class="tabmark" data-k="${k}" transform="translate(${t.x.toFixed(3)} ${fy(t.y).toFixed(3)}) rotate(${(-t.a * 180 / Math.PI).toFixed(2)})"><rect x="${-tl / 2}" y="${-tw / 2}" width="${tl}" height="${tw}"><title>Tab${sh.tabsManual ? ' (placed by hand)' : ''}${tabEdit ? ' · drag to move, right-click to remove' : ''}</title></rect>${tabEdit ? '<circle class="tabhit" r="1"/>' : ''}</g>`;
     });
   }
@@ -1217,8 +1235,7 @@ function renderSheet(item) {
       <span class="legend"><span><i style="background:var(--path)"></i>cut</span><span><i style="background:var(--rapid)"></i>rapid</span><span><i style="background:var(--pocket)"></i>dado</span><span><i style="background:var(--drill)"></i>drill</span>${usesTabs(item.cfg) ? '<span><i style="background:var(--tab)"></i>tab</span>' : ''}</span>
     </div>
     ${moveEdit ? `<p class="small screw-help">Moving parts: drag a part where you want it. A custom shape has a round handle above it: drag the handle to turn the part (in the custom-shape steps, or a half turn when its grain is set; hold Shift for single degrees). If it would come too close to another part's cut, a hold-down screw or the edge of the stock, it goes to the nearest spot where it fits (dashed outline while dragging). Right-click a part to copy, delete or put it back; right-click a spot to paste. ${sh.partsMoved || 0} moved${sh.partsAdded ? `, ${sh.partsAdded} pasted` : ''}${sh.partsRemoved ? `, ${sh.partsRemoved} deleted` : ''} on this sheet. <button id="moveReset" ${sh.partsMoved ? '' : 'disabled'}>Put all back</button>${moveMsg ? `<br><span class="${moveMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(moveMsg.replace(/^!/, ''))}</span>` : ''}${job.pendingQty && Object.keys(job.pendingQty).length ? '<br><strong>Parts added or deleted: Nest &amp; toolpath nests again with the new counts.</strong> Until then deleted parts leave their spot empty and pasted ones stay where you put them.' : ''}</p>` : ''}
-    ${tabEdit && !item.tp ? '<p class="small screw-help">Tabs go on the bit\'s path: click <b>Toolpath</b> first, then place them here.</p>' : ''}
-    ${tabEdit && item.tp ? `<p class="small screw-help">Placing tabs: click near a part's edge to add a tab there (it goes on the bit's path, along that edge, clear of the corners; on a line two parts share it holds both), drag one to move it, right-click to remove it. ${item.tp?.tabs?.length || 0} on this sheet${sh.tabsManual ? ' (placed by hand: parts without one get none)' : ''}. <button id="tabAuto" ${sh.tabsManual ? '' : 'disabled'}>Back to automatic</button> <button id="tabClear" ${item.tp?.tabs?.length ? '' : 'disabled'}>Remove all</button>${tabMsg ? `<br><span class="${tabMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(tabMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
+    ${tabEdit ? `<p class="small screw-help">Placing tabs: click near a part's edge to add a tab there (it goes on the bit's path, along that edge, clear of the corners; on a line two parts share it holds both), drag one to move it, right-click to remove it. ${tabsView(item)?.tabs?.length || 0} on this sheet${sh.tabsManual ? ' (placed by hand: parts without one get none)' : ''}. <button id="tabAuto" ${sh.tabsManual ? '' : 'disabled'}>Back to automatic</button> <button id="tabClear" ${tabsView(item)?.tabs?.length ? '' : 'disabled'}>Remove all</button>${tabMsg ? `<br><span class="${tabMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(tabMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
     ${screwEdit ? `<p class="small screw-help">Placing screws: click an empty spot to add one, drag to move, right-click to remove. A screw dropped too close to a cut goes to the nearest spot clear of it. Red = a cut or part is too close. ${sh.screws?.length || 0} on this sheet${sh.screwsManual ? ' (placed by hand)' : ''}. <button id="screwAuto" ${sh.screwsManual ? '' : 'disabled'}>Back to automatic</button> <button id="screwClear" ${sh.screws?.length ? '' : 'disabled'}>Remove all</button>${screwMsg ? `<br><span class="${screwMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(screwMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
     ${svg}
     ${simNote}
@@ -1273,6 +1290,7 @@ function setSheetTabs(item, list) {
   if (!Object.keys(m).length) delete job.manualTabs[item.mkey];
   item.sheet.tabsManual = list ? m[item.idx] : undefined;
   // shown at once on the bit's path (Back to automatic: the automatic ones come with Toolpath)
+  item.tabView = null;   // before Toolpath: worked out again from the layout and the new list
   if (item.tp) {
     const opt = item.cfg.tabs || {};
     item.tp = { ...item.tp, tabs: (list || []).map((q) => {
@@ -1300,11 +1318,12 @@ function wireTabEdit(item, svgEl, fy) {
     const p = pt.matrixTransform(svgEl.getScreenCTM().inverse());
     return { x: p.x, y: fy(p.y) };
   };
-  if (!item.tp) return;   // tabs go on the bit's path: Toolpath first
+  if (!tabsView(item)) return;
   const opt = item.cfg.tabs || {};
   const okOpt = opt.length > 0 && opt.thickness > 0;
-  const snap = (p) => tabOnPaths(item.tp.tabPaths || [], [p.x, p.y], item.cfg.tool, opt);
-  const list = () => (item.tp.tabs || []).map((t) => ({ x: t.x, y: t.y }));
+  // on the bit's path: from the toolpath, or worked out from the layout before Toolpath
+  const snap = (p) => tabOnPaths(tabsView(item)?.tabPaths || [], [p.x, p.y], item.cfg.tool, opt);
+  const list = () => (tabsView(item)?.tabs || []).map((t) => ({ x: t.x, y: t.y }));
   let drag = null;
   svgEl.addEventListener('contextmenu', (e) => {
     e.preventDefault();
