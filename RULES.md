@@ -48,16 +48,18 @@ toolpath / nesting code. Every rule here is a mistake that already happened once
    pocket wherever it safely can.
 3. **Contours start at the nearest point on the edge**, not the nearest corner
    (tabbed parts excepted).
-4. **One bit for dados and profiles → interleave per part** (no separate trip for
-   all the dados) — except when a drill-only bit has holes inside dados: then all
-   the dados go first, the holes, and the bit is loaded again for the profiles
-   (rule 5).
-5. **Dados before holes, and each bit is loaded once per sheet** with everything
-   it does: dado bit (dados, then its own holes) → drill-only bits → profile bit.
+4. **Dados before any outline when dados go first.** With *Dados before holes
+   (always)* on, every dado on the sheet is cut before any hole or outline — even
+   with one bit — because cutting a part's outline early weakens the sheet while
+   dados are still to cut. The extra rapid travel is accepted. Only with it off
+   does one bit interleave per part (each part's dados right before its profile).
+5. **Always dados before holes** (*Dados before holes (always)*, on by default:
+   the shop runs one bit, no tool changer). Order: all dados → the dado bit's own
+   holes → drill-only bits → profile bit (its holes, then cutouts and outlines).
    A hole wholly inside a dado starts at the dado's floor, so it's shallower.
-   With one bit for dados and profiles, holes go first (no reload) unless a
-   drill-only bit has holes in a dado — that's the one allowed second load.
-   Manual bit changes cost far more than a few inches of rapid travel.
+   With one bit and a drill-only bit, the main bit is loaded twice (main → drill
+   → main): the one allowed second load. Turned off, one bit drills holes first
+   unless a drill-only bit has a hole in a dado (no reload).
    Holes deeper than *Peck holes deeper than* (0.5") from where they start are
    pecked in *Peck step* (3/8") strokes, lifting to *Peck retract* (0.05") above
    the hole's top between strokes.

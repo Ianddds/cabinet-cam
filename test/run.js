@@ -642,20 +642,27 @@ for (const g of groupParts(parts)) {
       // (the shared-lines run also ramps into pockets at 45°, so ramps stay checked)
       const tp = sheetToolpaths(sh, { ...s, ...tl, commonLine: cl, holdDown: cl ? 'tabs' : s.holdDown, pocketRampAngle: cl ? 45 : 0, thickness: g.thickness });
       const loads = tp.moves.filter((m) => m.toolchange).map((m) => m.tool);
-      check(new Set(loads).size === loads.length, `each bit loaded once per sheet (${loads.map((t) => t.name).join(', ')})`);
-      // every bit's holes come before anything else it cuts, and drill-only bits come first
-      let curT = null, cutYet = false, badDrill = 0;
+      const oneBit = tl.tool === tl.dadoTool || (tl.tool.dia === tl.dadoTool.dia && tl.tool.name === tl.dadoTool.name);
+      // dados before holes (dadosFirst): with one bit and a drill bit, the main
+      // bit is loaded again after the drill for the profiles; otherwise once each
+      const reload = oneBit && loads.length >= 3 && loads[0] === loads[loads.length - 1];
+      const uniq = reload ? loads.slice(0, -1) : loads;
+      check(new Set(uniq).size === uniq.length, `each bit loaded once per sheet${reload ? ' (main bit again after the drill)' : ''} (${loads.map((t) => t.name).join(', ')})`);
+      // every pocket on the sheet is cut before any drill-only bit drills, and
+      // no profile move comes before a drill move of another bit
+      let pocketAfterDrill = 0, sawDrillOnly = false, curT = null;
       for (const m of tp.moves) {
-        if (m.toolchange) { curT = m.tool; cutYet = false; continue; }
+        if (m.toolchange) { curT = m.tool; continue; }
         if (m.g !== 1) continue;
-        if (m.op === 'drill' && cutYet) badDrill++;
-        if (m.op !== 'drill') cutYet = true;
+        const isMain = curT === tl.tool || curT === tl.dadoTool;
+        if (m.op === 'drill' && !isMain) sawDrillOnly = true;
+        if (m.op === 'pocket' && sawDrillOnly) pocketAfterDrill++;
       }
-      check(badDrill === 0, 'holes drilled before the bit cuts anything else');
+      check(pocketAfterDrill === 0, 'every dado cut before a drill bit drills');
       const drillOnly = loads.filter((t) => t !== tl.tool && t !== tl.dadoTool);
       if (drillOnly.length) {
         sheetsWithDrills++;
-        check(loads.slice(0, drillOnly.length).every((t) => drillOnly.includes(t)), 'drill-only bits go first');
+        if (!oneBit) check(loads.slice(1, 1 + drillOnly.length).every((t) => drillOnly.includes(t)), 'drill-only bits right after the dado bit');
       }
       // Every pocket floor is fully cut wherever the bit can reach (the floor
       // opened by the bit radius): no bumps on ends or walls, no ridges between
@@ -1905,6 +1912,30 @@ function distSeg(p, a, b) {
     const blind = byDepth.find((h) => Math.abs(h.bottom + 0.375) < 1e-6);
     check(blind && blind.ms.filter((m) => m.g === 0 && m.z > -0.375 && m.z < 0).length === 0, `${name}: a 3/8 deep hole is one plunge, no pecks`);
   }
+}
+
+// one bit and holes it drills itself: still one load; all the dados, then the
+// holes (the one in a dado starts at its floor), then the outlines
+{
+  const circ = (cx, cy, d, n = 48) => Array.from({ length: n }, (_, k) => [cx + (d / 2) * Math.cos((2 * Math.PI * k) / n), cy + (d / 2) * Math.sin((2 * Math.PI * k) / n)]);
+  const base = normalizeAll(sampleKitchen()).parts.find((p) => p.pockets?.length && /Left Side/.test(p.name));
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const dm = tl.tool.dia;
+  const part = { ...base, qty: 2, include: true, holes: [...(base.holes || []), circ(4.375, 10, dm), circ(20, 15, dm)] };
+  const sh = nestParts([part], { ...s0.sheet, respectGrain: true, searchMs: 50 }).sheets[0];
+  const mv = sheetToolpaths(sh, { ...s0, ...tl, thickness: part.thickness }).moves;
+  const loads = mv.filter((m) => m.toolchange);
+  check(loads.length === 1, `one bit, its own holes: one load (${loads.length})`);
+  const firstPocket = mv.findIndex((m) => m.op === 'pocket' && m.g === 1);
+  const firstDrill = mv.findIndex((m) => m.op === 'drill' && m.plunge);
+  check(firstPocket >= 0 && firstDrill > firstPocket, `one bit: dados before its holes (first dado ${firstPocket}, first hole ${firstDrill})`);
+  const lowStart = mv.some((m, i) => m.op === 'drill' && m.plunge && mv[i - 1] && Math.abs(mv[i - 1].z - (-0.25 + 0.02)) < 1e-6);
+  check(lowStart, 'one bit: the hole in the dado starts just above its floor');
+  const firstProfileCut = mv.findIndex((m) => m.op === 'profile' && m.g === 1 && m.z < 0);
+  const lastPocketM = mv.map((m, i) => (m.op === 'pocket' && m.g === 1 ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
+  const lastDrill = mv.map((m, i) => (m.op === 'drill' && m.plunge ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
+  check(lastPocketM < firstProfileCut && lastDrill < firstProfileCut, `one bit: every dado and hole on the sheet before the first outline (last dado ${lastPocketM}, last hole ${lastDrill}, first outline ${firstProfileCut})`);
 }
 
 console.log(`\npocket lifts after first entry: ${liftTotal} across ${pocketTotal} pockets`);

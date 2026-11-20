@@ -1904,9 +1904,10 @@ function sheetPlan(sheet, cfg, joinSkip) {
     }
   };
   // afterDados: the dados are already cut, so a hole inside one starts at its floor
-  const drillWith = (t, afterDados = false) => {
-    const ops = drillOps.filter((o) => o.tool === t);
+  const drillWith = (t, afterDados = false, pi = null) => {
+    const ops = drillOps.filter((o) => o.tool === t && !o.done && (pi == null || o.pi === pi));
     if (!ops.length) return;
+    for (const o of ops) o.done = true;
     load(t);
     const prevOp = pb.op;
     pb.op = 'drill';
@@ -1986,9 +1987,16 @@ function sheetPlan(sheet, cfg, joinSkip) {
   // drill-only bit has holes in a dado, all the dados go first and the bit is
   // loaded again for the profiles (instead of each part's dados with its
   // profile); otherwise the holes go first as before, with no reload.
-  const holesAfter = !sameTool || drillOps.some((o) => o.tool !== dado && o.floorTop < 0);
+  // cfg.dadosFirst (default on): always dados first, even with one bit and no
+  // hole in a dado (the price is that extra load). Off: only when it pays.
+  const holesAfter = cfg.dadosFirst !== false || !sameTool || drillOps.some((o) => o.tool !== dado && o.floorTop < 0);
   if (!holesAfter) for (const t of candidates) if (t !== dado && t !== cfg.tool) drillWith(t);
   const usesDado = plans.length || drillOps.some((o) => o.tool === dado);
+  // dados first: every dado on the sheet before any hole or outline, so no
+  // outline weakens the sheet while dados are still to cut (costs rapid travel
+  // with one bit). Only with it off does one bit cut each part's dados with its profile.
+  const keepInterleave = sameTool && plans.length > 0 && !holesAfter;
+  const holesPerPart = false;
   if (usesDado) {
     load(dado, `${sameTool ? 'Tool' : 'Dado tool'}: ${dado.name || ''} ${dado.dia}in`);
     if (!holesAfter) drillWith(dado);
@@ -2296,11 +2304,11 @@ function sheetPlan(sheet, cfg, joinSkip) {
   };
   const emitPocket = (pl) => { if (pl.done) return; pl.done = true; const po = planOrder(pl, pb.x == null ? home : [pb.x, pb.y]); runGroup(pl, pb, true, null, po.starts, po.order); pb.hopOk = null; };
   // same bit for dados and profiles: each part's dados go right before its profile
-  const interleave = sameTool && plans.length > 0 && !holesAfter;
+  const interleave = keepInterleave;
   if (plans.length && !interleave) {
     for (const pl of orderShortest(plans, here(), pocketEntry, pocketExit)) emitPocket(pl);
   }
-  if (holesAfter) {
+  if (holesAfter && !interleave) {
     if (usesDado) drillWith(dado, true);
     for (const t of candidates) if (t !== dado && t !== cfg.tool) drillWith(t, true);
   }
@@ -2312,6 +2320,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
   if (!(sameTool && loaded === dado)) load(tool, `${sameTool ? 'Tool' : 'Profile tool'}: ${tool.name || ''} ${tool.dia}in`);
   loaded = tool;
   if (tool !== dado) drillWith(tool, true);   // the dados are cut by now
+  else if (!holesPerPart) drillWith(tool, true);   // one bit, no dados: its holes before the profiles
   pb.op = 'profile';
   const skin = usesSkin(cfg) ? Math.max(0, Math.min(cfg.onionSkin || 0, T - 0.01)) : 0;
   const full = T + (cfg.overcut || 0);
@@ -2389,12 +2398,15 @@ function sheetPlan(sheet, cfg, joinSkip) {
   }
   // a part's dados still to cut (a joined one is cut with the first of its parts)
   const pk = (x) => x.pockets.filter((pl) => !pl.done);
+  const holesDone = new Set();
   const runPart = (x, zs, note, withPockets = false, passDone = null) => {
     if (withPockets && pk(x).length) {
       // same bit: this part's dados right before its profile, no trip back across the sheet
       for (const pl of orderShortest(pk(x), here(), pocketEntry, pocketExit, 30)) emitPocket(pl);
       pb.op = 'profile';
     }
+    // one bit, dados first: this part's holes right after its dados
+    if (holesPerPart && !holesDone.has(x.pi)) { holesDone.add(x.pi); drillWith(dado, true, x.pi); pb.op = 'profile'; }
     pb.comment(note ? `${x.label} ${note}` : x.label);
     // cutouts first (nearest first), outline last
     const holes = x.loops.slice(0, -1);
@@ -2511,6 +2523,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
         for (const pl of orderShortest(pk(x), here(), pocketEntry, pocketExit, 30)) emitPocket(pl);
         pb.op = 'profile';
       }
+      if (holesPerPart && !holesDone.has(x.pi)) { holesDone.add(x.pi); drillWith(dado, true, x.pi); pb.op = 'profile'; }
       pb.comment(note ? `${x.label} ${note}` : x.label);
       const holes = x.loops.slice(0, -1);
       while (holes.length) {
