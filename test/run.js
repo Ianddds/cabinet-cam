@@ -1578,7 +1578,16 @@ function opOrder(sheet, moves, reach) {
     { part: P('STRETCHER-F', 61, 3.5, [pk(29.8, 0, 30.5, 3.5)]), copy: 1, x: x2, y: 0.125, rotated: false },
     { part: P('BOTTOM', 61, 20, [pk(30.5, 0, 31.2, 20)]), copy: 1, x: x2, y: 0.125 + 3.5 + g, rotated: false },
   ] };
-  const tp = sheetToolpaths(sheet, { ...s0, ...tl, thickness: 0.75, holdDown: 'tabs' });
+  // this checks the per-part order (each part's dados with its profile), which
+  // only runs with Dados before holes off; with it on every dado goes first and
+  // the extra travel is accepted (checked just below)
+  const tp = sheetToolpaths(sheet, { ...s0, ...tl, thickness: 0.75, holdDown: 'tabs', dadosFirst: false });
+  {
+    const mvA = sheetToolpaths(sheet, { ...s0, ...tl, thickness: 0.75, holdDown: 'tabs' }).moves;
+    const lastPk = mvA.map((m, i) => (m.op === 'pocket' && m.g === 1 ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
+    const firstPr = mvA.findIndex((m) => m.op === 'profile' && m.g === 1 && m.z < 0);
+    check(lastPk >= 0 && lastPk < firstPr, `dados first: every dado on the sheet before the first outline (last dado ${lastPk}, first outline ${firstPr})`);
+  }
   let rap = 0, prev = null;
   for (const m of tp.moves) { if (m.x == null) continue; if (prev && m.g === 0) rap += Math.hypot(m.x - prev.x, m.y - prev.y); prev = m; }
   // in the order the neighbours happen to be listed this was 189" (SIDE-R > SIDE-L > STRETCHER-F > BOTTOM)
