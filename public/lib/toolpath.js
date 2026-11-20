@@ -1826,7 +1826,37 @@ function sheetPlan(sheet, cfg, joinSkip) {
     // holes drilled into a pocket's floor: the pocket goes straight across them
     const filled = round.length ? pockets.map((p) => fillHoleBites(p, round)) : pockets;
     x.g = { ...x.g, pockets: filled, holes };
+    // a hole wholly inside a pocket starts at its floor (drilled after the dados,
+    // so it's that much shallower); the deepest such pocket counts
+    const pi = geo.indexOf(x);
+    for (const o of drillOps) {
+      if (o.pi !== pi) continue;
+      let top = 0;
+      for (const p of filled) {
+        if (!(p.depth > -top) || !inRegion(o.center, p.loops)) continue;
+        let clear = Infinity;
+        for (const l of p.loops) for (let k = 0; k < l.length; k++) clear = Math.min(clear, distToSeg(o.center, l[k], l[(k + 1) % l.length]));
+        if (clear >= o.d / 2 - 1e-3) top = -p.depth;
+      }
+      o.floorTop = top < o.depth * -1 + 1e-6 ? 0 : top;   // (never at or below the hole's own bottom)
+    }
   }
+  // Peck drilling: a hole deeper than peckOver from where it starts goes in
+  // strokes of peckStep (or the bit's own Peck), lifting to peckRetract above the
+  // top of the hole between them and rapiding back to just above the last stroke
+  const PECK = { over: cfg.peckOver ?? 0.5, step: cfg.peckStep ?? 0.375, retract: cfg.peckRetract ?? 0.05 };
+  const drillHole = (b, t, top, bottom) => {
+    const deep = bottom + top;   // depth below where the hole starts (top <= 0)
+    const step = deep > PECK.over + 1e-9 ? (t.peck > 0 ? t.peck : PECK.step) : 0;
+    let z = top;
+    while (z > -bottom + 1e-6) {
+      const nz = step > 0 ? Math.max(-bottom, z - step) : -bottom;
+      if (z < top - 1e-9) b.rapidZ(z + 0.02);   // back down to just above the last stroke
+      b.plunge(nz, top);
+      z = nz;
+      if (z > -bottom + 1e-6) b.rapidZ(top + PECK.retract);   // clear the chips
+    }
+  };
 
   const home = [0, 0];
   const here = () => (pb.x == null ? home : [pb.x, pb.y]);
@@ -1845,21 +1875,13 @@ function sheetPlan(sheet, cfg, joinSkip) {
   const drillScrews = (t, b = pb, stop = true) => {
     const depth = SCR.depth > 0 ? SCR.depth : T + (cfg.overcut || 0);
     if (depth >= T && t.dia >= (SCR.head || 0.375) - 1e-6) warnings.push(`Screw holes go right through with the ${t.name || t.dia + 'in'} bit, which is as wide as the screw heads (${SCR.head}"): the heads will pull through. Set Hole depth to a counterbore (e.g. 0.25) or use washers.`);
-    const peck = t.peck || 0;
     const prevOp = b.op;
     b.op = 'screw';
     b.comment(`Screw holes: ${sheet.screws.length} with ${t.name || t.dia + 'in'}, ${depth.toFixed(3)} deep`);
     for (const q of orderShortest(sheet.screws, home, (q, pos) => dist([q.x, q.y], pos), (q) => [q.x, q.y])) {
       b.rapidTo(q.x, q.y);
       b.rapidZ(0.05);
-      let z = 0;
-      while (z > -depth + 1e-6) {
-        const nz = peck > 0 ? Math.max(-depth, z - peck) : -depth;
-        if (z < 0) b.rapidZ(z + 0.02);
-        b.plunge(nz);
-        z = nz;
-        if (z > -depth + 1e-6) b.rapidZ(0.05);
-      }
+      drillHole(b, t, 0, depth);
       b.retract();
     }
     const park = cfg.park || { x: 0, y: 0 };
@@ -1881,27 +1903,21 @@ function sheetPlan(sheet, cfg, joinSkip) {
       } else drillScrews(t);
     }
   };
-  const drillWith = (t) => {
+  // afterDados: the dados are already cut, so a hole inside one starts at its floor
+  const drillWith = (t, afterDados = false) => {
     const ops = drillOps.filter((o) => o.tool === t);
     if (!ops.length) return;
     load(t);
     const prevOp = pb.op;
     pb.op = 'drill';
     pb.comment(`Drill ${ops.length} hole${ops.length === 1 ? '' : 's'} with ${t.name || t.dia + 'in'}`);
-    // entry ipm for the first entryDepth, then drill ipm (handled by plunge); peck 0 = one plunge
-    const peck = t.peck || 0;
+    // entry ipm for the first entryDepth into the sheet's face, then drill ipm
+    // (handled by plunge); from a dado floor it rapids down to just above it
     for (const o of orderShortest(ops, pb.x == null ? home : [pb.x, pb.y], (o, pos) => dist(o.center, pos), (o) => o.center)) {
       pb.rapidTo(o.x, o.y, lowTo(o.pi)(o.center));
       curPart = o.pi;
       if (pb.z > 0.05) pb.rapidZ(0.05);
-      let z = 0;
-      while (z > -o.depth + 1e-6) {
-        const nz = peck > 0 ? Math.max(-o.depth, z - peck) : -o.depth;
-        if (z < 0) pb.rapidZ(z + 0.02); // back down to just above the last peck
-        pb.plunge(nz);
-        z = nz;
-        if (z > -o.depth + 1e-6) pb.rapidZ(0.05); // clear chips
-      }
+      drillHole(pb, t, afterDados ? o.floorTop || 0 : 0, o.depth);
     }
     pb.op = prevOp;
   };
@@ -1964,11 +1980,18 @@ function sheetPlan(sheet, cfg, joinSkip) {
   // does: drill-only bits (their holes) -> dado bit (holes, then dados) ->
   // profile bit (holes, then cutouts and outlines). When the dado bit is the
   // profile bit that's one load: holes, then each part's dados with its profile.
-  for (const t of candidates) if (t !== dado && t !== cfg.tool) drillWith(t);
+  // Dados before holes, so a hole in a dado starts at its floor (shallower):
+  // dado bit (dados, then its own holes) -> drill-only bits -> profile bit.
+  // Different dado and profile bits: no extra loads. One bit for both: when a
+  // drill-only bit has holes in a dado, all the dados go first and the bit is
+  // loaded again for the profiles (instead of each part's dados with its
+  // profile); otherwise the holes go first as before, with no reload.
+  const holesAfter = !sameTool || drillOps.some((o) => o.tool !== dado && o.floorTop < 0);
+  if (!holesAfter) for (const t of candidates) if (t !== dado && t !== cfg.tool) drillWith(t);
   const usesDado = plans.length || drillOps.some((o) => o.tool === dado);
   if (usesDado) {
     load(dado, `${sameTool ? 'Tool' : 'Dado tool'}: ${dado.name || ''} ${dado.dia}in`);
-    drillWith(dado);
+    if (!holesAfter) drillWith(dado);
   }
   // Keep the cutter down: a short safe move to the next row is fed at depth;
   // it lifts only when the next start is too far away or the straight move
@@ -2273,9 +2296,13 @@ function sheetPlan(sheet, cfg, joinSkip) {
   };
   const emitPocket = (pl) => { if (pl.done) return; pl.done = true; const po = planOrder(pl, pb.x == null ? home : [pb.x, pb.y]); runGroup(pl, pb, true, null, po.starts, po.order); pb.hopOk = null; };
   // same bit for dados and profiles: each part's dados go right before its profile
-  const interleave = sameTool && plans.length > 0;
+  const interleave = sameTool && plans.length > 0 && !holesAfter;
   if (plans.length && !interleave) {
     for (const pl of orderShortest(plans, here(), pocketEntry, pocketExit)) emitPocket(pl);
+  }
+  if (holesAfter) {
+    if (usesDado) drillWith(dado, true);
+    for (const t of candidates) if (t !== dado && t !== cfg.tool) drillWith(t, true);
   }
 
   // ---- profiles ----
@@ -2284,7 +2311,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
   const r = tool.dia / 2;
   if (!(sameTool && loaded === dado)) load(tool, `${sameTool ? 'Tool' : 'Profile tool'}: ${tool.name || ''} ${tool.dia}in`);
   loaded = tool;
-  if (tool !== dado) drillWith(tool);
+  if (tool !== dado) drillWith(tool, true);   // the dados are cut by now
   pb.op = 'profile';
   const skin = usesSkin(cfg) ? Math.max(0, Math.min(cfg.onionSkin || 0, T - 0.01)) : 0;
   const full = T + (cfg.overcut || 0);

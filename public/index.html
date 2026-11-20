@@ -94,6 +94,9 @@
           </label>
           <label class="field" title="0 = plunge straight down (default). Above 0, pockets ramp down along the path at this angle instead (45° on a 1/4 deep dado is a 1/4 long ramp; up to 80°).">Pocket ramp angle° (0 = plunge)<input type="number" step="5" min="0" max="80" data-path="pocketRampAngle" /></label>
           <label class="field" title="In a dado, the bit stays down and feeds back over floor it already cleared for moves up to this long; longer moves lift and rapid instead">Dado stay-down travel<input type="number" step="0.5" min="0" data-path="stayDownMax" /></label>
+          <label class="field" title="Holes deeper than this (measured from where the hole starts: the sheet top, or a dado's floor) are drilled in pecks; shallower ones in one plunge">Peck holes deeper than<input type="number" step="0.05" min="0" data-path="peckOver" /></label>
+          <label class="field" title="Depth of each peck. A bit with its own Peck value in the tool library uses that instead">Peck step<input type="number" step="0.025" min="0.05" data-path="peckStep" /></label>
+          <label class="field" title="Between pecks the bit lifts to this far above the top of the hole to clear chips, then rapids back down to just above the last peck">Peck retract<input type="number" step="0.01" min="0" data-path="peckRetract" /></label>
           <label class="field">Spin-up sec<input type="number" step="1" data-path="spinupSeconds" /></label>
           <label class="field">Z zero
             <select data-path="zZero"><option value="top">Material top</option><option value="table">Spoilboard</option></select>

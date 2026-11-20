@@ -1850,6 +1850,63 @@ function distSeg(p, a, b) {
   check(intoStock === 0, `no rapid goes down into uncut stock (${intoStock})`);
 }
 
+// ---------- holes after dados, from the dado floor; peck drilling ----------
+{
+  const circ = (cx, cy, d, n = 48) => Array.from({ length: n }, (_, k) => [cx + (d / 2) * Math.cos((2 * Math.PI * k) / n), cy + (d / 2) * Math.sin((2 * Math.PI * k) / n)]);
+  const base = normalizeAll(sampleKitchen()).parts.find((p) => p.pockets?.length && /Left Side/.test(p.name));
+  const d5 = 5 / 25.4;
+  const dadoX = 4.375, inDado = [dadoX, 10], faceBlind = [20, 10], faceThru = [20, 15];
+  const part = { ...base, qty: 1, include: true,
+    holes: [...(base.holes || []), circ(...inDado, d5), circ(...faceThru, d5)],
+    pockets: [...base.pockets, { loops: [circ(...faceBlind, d5)], depth: 0.375 }] };
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const quarter = DEFAULT_LIBRARY.find((t) => Math.abs(t.dia - 0.25) < 1e-6 && !/drill/i.test(t.name));
+  const sh = nestParts([part], { ...s0.sheet, respectGrain: true, searchMs: 50 }).sheets[0];
+  const pl = sh.placements[0];
+  const at = (p) => placedGeometry(pl).map ? null : null;
+  // where a part point lands on the sheet: match by the placed geometry of the drilled holes
+  for (const [name, tools] of [['one bit', {}], ['separate dado bit', quarter ? { dadoTool: quarter } : null]]) {
+    if (!tools) continue;
+    const cfg = { ...s0, ...tl, ...tools, thickness: part.thickness };
+    const tp = sheetToolpaths(sh, cfg);
+    const mv = tp.moves;
+    let tool = null;
+    const tagged = mv.map((m) => { if (m.toolchange) tool = m.tool; return { ...m, bit: tool }; });
+    const isDrillBit = (t) => t && Math.abs(t.dia - d5) < 0.006;
+    const lastPocket = tagged.map((m, i) => (m.op === 'pocket' && m.g === 1 ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
+    const firstDrill = tagged.findIndex((m) => m.op === 'drill' && isDrillBit(m.bit) && m.plunge);
+    check(lastPocket >= 0 && firstDrill > lastPocket, `${name}: every dado is cut before the 5 mm holes (last dado move ${lastPocket}, first hole ${firstDrill})`);
+    const loads = mv.filter((m) => m.toolchange).map((m) => m.tool.name);
+    if (name === 'one bit') check(loads.length === 3 && loads[0] === loads[2] && isDrillBit(mv.filter((m) => m.toolchange)[1].tool), `one bit: main bit, then the drill, then the main bit again for the profiles (${loads.join(' -> ')})`);
+    else check(loads.length === 3 && isDrillBit(mv.filter((m) => m.toolchange)[1].tool), `separate dado bit: dado bit, drill, profile bit — no extra loads (${loads.join(' -> ')})`);
+    // group the drill plunges by hole
+    const holes = new Map();
+    tagged.forEach((m, i) => { if (m.op === 'drill' && isDrillBit(m.bit) && m.x != null) { const k = `${m.x.toFixed(3)},${m.y.toFixed(3)}`; if (!holes.has(k)) holes.set(k, []); holes.get(k).push({ ...m, i }); } });
+    // every move from a hole's first plunge to its last (lifts carry no x, y)
+    const byDepth = [...holes.values()].map((ms0) => { const pl0 = ms0.filter((m) => m.plunge); const ms = tagged.slice(pl0[0].i, pl0[pl0.length - 1].i + 1).map((m, k) => ({ ...m, i: pl0[0].i + k })); return { ms, bottom: Math.min(...ms.map((m) => m.z)), plunges: ms.filter((m) => m.plunge) }; }).filter((h) => h.plunges.length);
+    // the hole in the dado: starts at the floor (-0.25), no slow entry, pecks 0.51 deep in <= 3/8 strokes, lifts to floor + 0.05
+    const dadoHole = byDepth.find((h) => h.plunges.length && Math.max(...h.ms.map((m) => m.z)) < 0 && h.bottom < -0.7);
+    check(!!dadoHole, `${name}: a hole drilled from a dado's floor (never above the sheet between strokes)`);
+    if (dadoHole) {
+      const firstZ = mv[dadoHole.plunges[0].i - 1].z;
+      check(Math.abs(firstZ - (-0.25 + 0.02)) < 1e-6, `${name}: the hole in the dado starts just above its floor (${firstZ})`);
+      check(!dadoHole.plunges.some((m) => m.f === m.bit.entryFeed && m.bit.entryFeed !== m.bit.drillFeed), `${name}: no slow entry from a dado floor`);
+      const lifts = dadoHole.ms.filter((m) => !m.plunge && m.g === 0 && m.z > -0.25);
+      check(lifts.length >= 1 && lifts.every((m) => Math.abs(m.z - (-0.25 + 0.05)) < 1e-6), `${name}: pecks lift to 0.05 over the dado floor (${lifts.map((m) => m.z.toFixed(3))})`);
+    }
+    // face through hole: 0.76 deep -> strokes of 3/8, lifting to +0.05
+    const thru = byDepth.find((h) => h !== dadoHole && h.bottom < -0.7);
+    const strokes = (h) => { const zs = []; let z = mv[h.plunges[0].i - 1].z; for (const m of h.ms) { if (m.plunge) zs.push(z - m.z); z = m.z; } return zs; };
+    check(thru && thru.plunges.length >= 3 && strokes(thru).every((d) => d <= 0.375 + 0.03), `${name}: through hole from the face pecked in 3/8 strokes (${thru && strokes(thru).map((d) => d.toFixed(3))})`);
+    const ups = thru ? thru.ms.filter((m) => !m.plunge && m.g === 0 && m.z > 0) : [];
+    check(ups.length >= 2 && ups.every((m) => Math.abs(m.z - 0.05) < 1e-6), `${name}: face hole lifts to 0.05 between pecks (${ups.map((m) => m.z)})`);
+    // 3/8 deep blind hole: one plunge
+    const blind = byDepth.find((h) => Math.abs(h.bottom + 0.375) < 1e-6);
+    check(blind && blind.ms.filter((m) => m.g === 0 && m.z > -0.375 && m.z < 0).length === 0, `${name}: a 3/8 deep hole is one plunge, no pecks`);
+  }
+}
+
 console.log(`\npocket lifts after first entry: ${liftTotal} across ${pocketTotal} pockets`);
 check(arcTotal > 20, `G-code uses arcs (${arcTotal} G2/G3 in the sample job)`);
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');

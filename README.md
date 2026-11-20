@@ -275,7 +275,9 @@ Round holes are found from the geometry (no tagging needed) and matched against 
 | Through, bigger | inside contour only — the slug drops out |
 | Smaller than everything | flagged, not cut |
 
-Tool order on a sheet: drilling first, and each bit loaded once with everything it does: each drill-only bit (its holes) → dado tool (its holes, then dados) → profile tool (its holes, then cutouts and outlines). When the dado tool is the profile tool that's a single load: holes, then each part's dados with its profile. Holes on the face opposite the dados are flagged as needing a flip.
+Tool order on a sheet: dados before holes, each bit loaded once with everything it does: dado tool (dados, then its holes) → each drill-only bit (its holes) → profile tool (its holes, then cutouts and outlines). A hole wholly inside a dado (a screw hole through a dado, say) starts at the dado's floor: the bit rapids down to just above the floor, with no slow entry, so the hole is that much shallower. When the dado tool is the profile tool: if a drill-only bit has holes in a dado, all the dados go first, then the holes, then the bit is loaded again for the profiles (one extra bit change); otherwise the holes go first and each part's dados go in with its profile (no reload). Holes on the face opposite the dados are flagged as needing a flip.
+
+**Peck drilling** (settings, Cutting): a hole deeper than **Peck holes deeper than** (0.5") — measured from where it starts, the sheet top or a dado floor — is drilled in **Peck step** strokes (3/8"; a bit with its own Peck in the tool library uses that), lifting to **Peck retract** (0.05") above the top of the hole between strokes and rapiding back to 0.02" above the last one. Shallower holes are one plunge. Screw holes follow the same rule.
 
 ## Posts
 

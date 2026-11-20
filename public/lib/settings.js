@@ -36,6 +36,9 @@ export const DEFAULT_SETTINGS = {
   tabs: { on: false, length: 0.375, thickness: 0.125, ramp: 0.25, spacing: 18, min: 2, maxArea: 0 },  // ramp: length of the slope on and off each tab (0 = straight up and down)
   overcut: 0.01,
   stayDownMax: 3,
+  peckOver: 0.5,     // holes deeper than this (from where the hole starts) are pecked
+  peckStep: 0.375,   // ... this deep a stroke (a bit's own Peck, if set, wins)
+  peckRetract: 0.05, // ... lifting this far above the top of the hole between strokes
   smallPartArea: 50,   // final pass frees parts under this many sq in first (0 = one trip, least travel)      // dados: feed back over cleared floor up to this far instead of lifting
   climb: false,
   zZero: 'top',

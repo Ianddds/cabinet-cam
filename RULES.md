@@ -49,10 +49,18 @@ toolpath / nesting code. Every rule here is a mistake that already happened once
 3. **Contours start at the nearest point on the edge**, not the nearest corner
    (tabbed parts excepted).
 4. **One bit for dados and profiles → interleave per part** (no separate trip for
-   all the dados).
-5. **Drilling first, and each bit is loaded once per sheet** with everything it
-   does (its holes first). Manual bit changes cost far more than a few inches of
-   rapid travel.
+   all the dados) — except when a drill-only bit has holes inside dados: then all
+   the dados go first, the holes, and the bit is loaded again for the profiles
+   (rule 5).
+5. **Dados before holes, and each bit is loaded once per sheet** with everything
+   it does: dado bit (dados, then its own holes) → drill-only bits → profile bit.
+   A hole wholly inside a dado starts at the dado's floor, so it's shallower.
+   With one bit for dados and profiles, holes go first (no reload) unless a
+   drill-only bit has holes in a dado — that's the one allowed second load.
+   Manual bit changes cost far more than a few inches of rapid travel.
+   Holes deeper than *Peck holes deeper than* (0.5") from where they start are
+   pecked in *Peck step* (3/8") strokes, lifting to *Peck retract* (0.05") above
+   the hole's top between strokes.
 6. **Holes and dados / rabbets before the part is cut out.** Either can come
    first, but each is done completely in one operation before the next starts
    (a bit's holes aren't split up by other work), and both are finished before
