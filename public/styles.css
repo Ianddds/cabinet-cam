@@ -295,3 +295,7 @@ tr.group td.gtick { cursor: default; }
 .sheet-svg g.rot-handle line { stroke: var(--accent); stroke-width: 0.12; }
 .sheet-svg g.rot-handle circle { fill: var(--panel); stroke: var(--accent); stroke-width: 0.18; cursor: grab; }
 .sheet-svg g.rot-handle circle:hover { fill: color-mix(in srgb, var(--accent) 25%, var(--panel)); }
+
+/* sheets waiting for Toolpath */
+.tp-need { color: #b8860b; font-weight: 600; font-size: 12px; }
+.parts-foot #toolpathBtn { margin-left: 8px; }

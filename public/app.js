@@ -38,10 +38,13 @@ function markStale() {
 function showStale() {
   $('#staleBar').hidden = !stale;
   // files, layouts and labels from out-of-date sheets would be wrong
-  const busy = results.some((r) => r.sheets.some((x) => x.replanning || x.replanError));   // a sheet's toolpaths are being redone
+  const busy = results.some((r) => r.sheets.some((x) => x.replanning || x.replanError || !x.tp || x.tpStale));   // files need every sheet's toolpaths, up to date
+  const todo = results.flatMap((r) => r.sheets).filter((x) => !x.tp || x.tpStale).length;
+  $('#toolpathBtn').disabled = stale || !todo || !!results.pendingShapes;
+  $('#toolpathBtn').title = stale ? 'Update the sheets first' : todo ? `Plan the toolpaths for ${todo} sheet${todo === 1 ? '' : 's'}` : results.length ? 'Every sheet has its toolpaths' : 'Nest first';   // a sheet's toolpaths are being redone
   const off = stale || busy || !!results.pendingShapes;
   for (const id of ['#saveFilesBtn', '#saveFilesMore']) $(id).disabled = off;
-  $('#printMenuBtn').disabled = stale || busy;
+  $('#printMenuBtn').disabled = stale;   // layouts, labels and cut lists don't need toolpaths
   $('#markCut').disabled = (stale || busy || !!results.pendingShapes) && !job.cut;
 }
 let activeSheet = 0;
@@ -505,7 +508,7 @@ function settingsProblems(s, tl) {
 // by side) and the winning layout is kept in job.nests, keyed by what it depends
 // on (parts, sizes, grain, sheet). Saved jobs bring their layouts back exactly.
 // Settings that only change toolpaths reuse the kept layout; if the nest inputs
-// changed, a quick nest is shown until Nest & toolpath is clicked again.
+// changed, a quick nest is shown until Nest is clicked again.
 let searching = null;
 
 // remnants that can take this group's parts (same material name and thickness)
@@ -660,7 +663,7 @@ async function searchNests(force = false) {
   finally {
     clearInterval(timer);
     searching = null;
-    $('#nestBtn').textContent = 'Nest & toolpath';
+    $('#nestBtn').textContent = 'Nest';
     btns.forEach((b) => { b.disabled = false; });
   }
   await runNest();
@@ -732,6 +735,79 @@ async function planSheets(jobs, onDone) {
   return out;
 }
 
+// Toolpath: plan every sheet that has no toolpaths yet (after Nest, or a hand
+// edit dropped them), in workers, with the popup. The nest's notes and every
+// sheet's toolpath warnings are shown together afterwards.
+let planning = false;
+async function planAll() {
+  if (planning || !results.length) return;
+  const items = results.flatMap((r) => r.sheets).filter((x) => !x.tp || x.tpStale);
+  if (!items.length) return;
+  planning = true;
+  busyPop.start('Planning toolpaths…', `0 of ${items.length} sheets`);
+  const was = results;
+  try {
+    const planned = await planSheets(items.map((item) => ({ sheet: item.sheet, cfg: item.cfg, checkScrews: screwsShown(item.cfg, item.sheet) })),
+      (n, of) => busyPop.set(n / of, `${n} of ${of} sheets`));
+    if (results !== was) return;   // re-nested meanwhile
+    const failed = [], bad = [];
+    items.forEach((item, k) => {
+      const r = planned[k];
+      if (r.error) { failed.push(`${item.label || item.title}: ${r.error}`); return; }
+      item.tp = r.tp;
+      item.tpStale = false;
+      item.screwChk = r.chk;
+      item.text = null;
+      item.screwText = null;
+      item.sim = null;
+      item.replanError = null;
+      nameFiles(item);
+      const n = r.chk.filter((c) => !c.ok).length;
+      if (n) bad.push(`${item.label || item.title}: ${n} hold-down screw${n === 1 ? ' is' : 's are'} in a bad spot (red) — move ${n === 1 ? 'it' : 'them'} before cutting`);
+    });
+    const all = results.flatMap((r) => r.sheets);
+    const warnings = [...(results.nestNotes || []), ...bad, ...new Set(all.filter((x) => x.tp).flatMap((x) => x.tp.warnings))];
+    const unplaced = results.flatMap((r) => r.unplaced.map((u) => `${u.name}: ${u.reason}`));
+    showMessages([
+      { error: true, text: failed.length ? 'Toolpaths could not be planned for:' : '', items: failed },
+      { error: true, text: unplaced.length ? 'Not placed:' : '', items: unplaced },
+      { text: warnings.length ? 'Check before cutting:' : '', items: warnings },
+    ]);
+    renderResults();
+  } finally {
+    planning = false;
+    busyPop.stop();
+  }
+}
+// Hand edits wait for Toolpath. A moved, pasted or deleted part drops the
+// sheet's toolpaths (they no longer fit the layout); a screw or tab edit keeps
+// them on show, marked out of date (tabs need the bit's path to snap to).
+function dropToolpaths(item) {
+  item.replanId = (item.replanId || 0) + 1;   // any plan still on its way is stale
+  item.replanning = false;
+  item.tp = null;
+  item.tpStale = false;
+  item.screwChk = [];
+  item.text = null;
+  item.screwText = null;
+  item.sim = null;
+  item.replanError = null;
+  renderResults();
+}
+
+function markEdited(item) {
+  item.replanId = (item.replanId || 0) + 1;
+  item.replanning = false;
+  item.tpStale = !!item.tp;
+  item.text = null;
+  item.screwText = null;
+  item.sim = null;
+  item.replanError = null;
+  // the screw check against the toolpaths there are (the layout hasn't changed)
+  item.screwChk = item.tp && screwsShown(item.cfg, item.sheet) ? screwCheck(item.sheet, item.tp.moves, item.cfg) : [];
+  renderResults();
+}
+
 let nestRun = 0;
 let nestActive = 0;   // runs under way (the sheets aren't in results till one finishes)
 async function runNest() {
@@ -761,8 +837,8 @@ async function runNestNow(run) {
       // remnants it was nested on that have gone since (used by another job, deleted)
       const gone = job.cut ? [] : (kept.stock || []).filter((r) => !stock.some((x) => x.id === r.id));
       const usedGone = nest && gone.filter((r) => nest.sheets.some((sh) => sh.remnant?.id === r.id));
-      if (usedGone?.length) { stockNotes.push(`${g.key}: remnant ${usedGone.map((r) => 'R' + r.no).join(', ')} is no longer on the rack — click Nest & toolpath to re-nest`); }
-      else if (nest && stockSig(kept.stock) !== stockSig(stock) && !job.cut) stockNotes.push(`${g.key}: the remnants on the rack changed — Nest & toolpath will look at them`);
+      if (usedGone?.length) { stockNotes.push(`${g.key}: remnant ${usedGone.map((r) => 'R' + r.no).join(', ')} is no longer on the rack — click Nest to re-nest`); }
+      else if (nest && stockSig(kept.stock) !== stockSig(stock) && !job.cut) stockNotes.push(`${g.key}: the remnants on the rack changed — Nest will look at them`);
     }
     if (!nest) { nest = nestParts(g.parts, nestOpts); quick = true; }
     const sf = shapesFor(nest, g, nestOpts);
@@ -789,33 +865,22 @@ async function runNestNow(run) {
     });
     res.push({ group: g, sheets, unplaced: nest.unplaced, lowerBound: nest.stats?.lowerBound });
   }
-  // toolpaths for every sheet, off the page's thread, with the count in the popup
-  busyPop.set(0, `0 of ${toPlan.length} sheets`);
-  const planned = await planSheets(toPlan.map(({ item }) => ({ sheet: item.sheet, cfg: item.cfg, checkScrews: screwsShown(item.cfg, item.sheet) })),
-    (n, of) => { if (run === nestRun) busyPop.set(n / of, `${n} of ${of} sheets`); });
+  // the layout only: toolpaths wait for the Toolpath button (planAll)
   if (run !== nestRun) return;   // a newer run started meanwhile: it shows its own
-  const failed = [];
-  toPlan.forEach(({ item, label }, k) => {
-    const r = planned[k];
-    if (r.error) { failed.push(`${label}: ${r.error}`); return; }
-    item.tp = r.tp;
-    item.screwChk = r.chk;
-    nameFiles(item);
-    const bad = r.chk.filter((c) => !c.ok).length;
-    if (bad) stockNotes.push(`${label}: ${bad} hold-down screw${bad === 1 ? ' is' : 's are'} in a bad spot (red) — move ${bad === 1 ? 'it' : 'them'} before cutting`);
-  });
-  if (failed.length) { showMessages([{ error: true, text: 'Toolpaths could not be planned for:', items: failed }]); return; }
+  for (const { item, label } of toPlan) { item.label = label; nameFiles(item); }
   results = res;
   stale = false;
   results.quick = quick;
   results.pendingShapes = pendingShapes;
   const all = results.flatMap((r) => r.sheets);
   activeSheet = Math.min(activeSheet, Math.max(0, all.length - 1));
-  const warnings = [...problems, ...stockNotes, ...new Set(all.flatMap((x) => x.tp.warnings))];
+  const warnings = [...problems, ...stockNotes];
+  results.nestNotes = warnings;
   const unplaced = results.flatMap((r) => r.unplaced.map((u) => `${u.name}: ${u.reason}`));
   showMessages([
     { error: true, text: unplaced.length ? 'Not placed:' : '', items: unplaced },
     { text: warnings.length ? 'Check before cutting:' : '', items: warnings },
+    { text: all.length ? 'Laid out. Arrange the sheets if you need to, then click Toolpath to plan them.' : '', items: [] },
     { text: pendingShapes ? `Fitting ${pendingShapes} custom shape${pendingShapes === 1 ? '' : 's'} in among the parts… the sheets update when it's done (downloads wait till then).` : '', items: [] },
   ]);
   renderResults();
@@ -845,87 +910,7 @@ function applyManualScrews(sheet, list) {
   }
 }
 
-// After a hand edit (tabs, screws, moved / pasted / deleted parts) the sheet's
-// toolpaths are re-planned in a worker (toolpath-worker.js): the new layout shows
-// at once, its toolpaths (and Check cut) when the worker answers. A newer edit
-// makes an older answer stale. No worker (or it fails): plan here, as before.
-let tpWorker = null;
-let replanSeq = 0;
-function toolpathWorker() {
-  if (tpWorker) return tpWorker;
-  const w = new Worker(new URL('./lib/toolpath-worker.js', import.meta.url), { type: 'module' });
-  const pending = new Map();
-  w.onmessage = (e) => {
-    const p = pending.get(e.data.id);
-    pending.delete(e.data.id);
-    if (!p) return;
-    if (e.data.error) { console.warn('toolpath worker:', e.data.error); p.sync(); } else p.done(e.data.tp, e.data.chk);
-  };
-  w.onerror = (e) => {
-    e.preventDefault?.();
-    for (const p of pending.values()) p.sync();
-    pending.clear();
-    tpWorker = null;
-    w.terminate();
-  };
-  tpWorker = { w, pending };
-  return tpWorker;
-}
-function replanSheet(item) {
-  const id = ++replanSeq;
-  item.replanId = id;
-  item.replanning = true;
-  item.text = null;
-  item.screwText = null;
-  item.sim = null;
-  const done = (tp, chk) => {
-    if (item.replanId !== id) return;   // a newer edit's plan is on its way
-    item.replanError = null;
-    item.tp = tp;
-    nameFiles(item);
-    item.screwChk = chk;
-    item.replanning = false;
-    item.text = null;
-    item.screwText = null;
-    item.sim = null;
-    renderResults();
-  };
-  const sync = () => {
-    if (item.replanId !== id) return;
-    try {
-      const tp = sheetToolpaths(item.sheet, item.cfg);
-      done(tp, screwsShown(item.cfg, item.sheet) ? screwCheck(item.sheet, tp.moves, item.cfg) : []);
-    } catch (err) {
-      // the plan itself failed: say so on the sheet instead of waiting forever
-      console.error('re-plan failed', err);
-      item.replanning = false;
-      item.replanError = String(err?.stack || err?.message || err);
-      renderResults();
-    }
-  };
-  // never wait forever: a plan that takes over a minute is stopped and reported
-  setTimeout(() => {
-    if (item.replanId !== id || !item.replanning) return;
-    const wk = tpWorker;
-    tpWorker = null;
-    if (wk) { wk.pending.delete(id); wk.w.terminate(); for (const p of wk.pending.values()) p.sync(); }   // other sheets waiting on it: plan here
-    item.replanning = false;
-    item.replanError = 'Re-planning took over a minute and was stopped.';
-    renderResults();
-  }, 60000);
-  try {
-    const wk = toolpathWorker();
-    wk.pending.set(id, { done, sync });
-    wk.w.postMessage({ id, sheet: item.sheet, cfg: item.cfg, checkScrews: screwsShown(item.cfg, item.sheet) });
-  } catch {
-    tpWorker?.pending.delete(id);
-    sync();
-    return;
-  }
-  renderResults();   // the new layout now; its toolpaths follow
-}
-
-// new screw list for one sheet (null = back to automatic): redo its toolpath
+// new screw list for one sheet (null = back to automatic): its toolpaths wait for Toolpath
 function setSheetScrews(item, list) {
   job.manualScrews = job.manualScrews || {};
   const m = (job.manualScrews[item.mkey] = job.manualScrews[item.mkey] || {});
@@ -933,7 +918,7 @@ function setSheetScrews(item, list) {
   else delete m[item.idx];
   if (!Object.keys(m).length) delete job.manualScrews[item.mkey];
   applyManualScrews(item.sheet, list);
-  replanSheet(item);
+  markEdited(item);
 }
 
 // A sheet's files: with separate screw holes, the screw file first (run it,
@@ -942,7 +927,7 @@ function setSheetScrews(item, list) {
 // lists in run order in any file list: …_S01a_screws.nc, then …_S01b.nc.
 // Otherwise just …_S01.nc. Redone whenever the sheet's toolpath is.
 function nameFiles(item) {
-  const pair = item.tp.screwMoves?.length > 0;
+  const pair = item.tp?.screwMoves?.length > 0;
   item.file = `${item.base}${pair ? 'b' : ''}.${item.ext}`;
   item.screwFile = pair ? `${item.base}a_screws.${item.ext}` : null;
 }
@@ -983,15 +968,16 @@ function renderResults() {
   const all = results.flatMap((r) => r.sheets);
   $('#resultsCard').hidden = !all.length;
   if (!all.length) return;
-  const mins = all.reduce((a, x) => a + x.tp.stats.estMinutes, 0);
+  const mins = all.reduce((a, x) => a + (x.tp ? x.tp.stats.estMinutes : 0), 0);
+  const todo = all.filter((x) => !x.tp || x.tpStale).length;
   const lb = results.reduce((a, r) => a + (r.lowerBound || 0), 0);
   const full = all.filter((x) => !x.sheet.remnant).length, rem = all.length - full;
   const keepN = all.reduce((a, x) => a + (x.sheet.offcuts?.length || 0), 0);
   $('#resultsSummary').textContent = `${full} sheet${full === 1 ? '' : 's'}` +
     (rem ? ` + ${rem} remnant${rem === 1 ? '' : 's'}` : '') +
-    (lb && lb < full ? ` (area minimum ${lb})` : '') + ` · ~${Math.round(mins)} min cutting` +
+    (lb && lb < full ? ` (area minimum ${lb})` : '') + (todo === all.length ? ' · no toolpaths yet: click Toolpath' : ` · ~${Math.round(mins)} min cutting` + (todo ? ` (${todo} sheet${todo === 1 ? ' needs' : 's need'} Toolpath)` : '')) +
     (keepN ? ` · ${keepN} offcut${keepN === 1 ? '' : 's'} to keep` : '') +
-    (results.quick ? ' · quick nest: click Nest & toolpath to search for a better one' : '');
+    (results.quick ? ' · quick nest: click Nest to search for a better one' : '');
   renderCutState();
   // custom shapes still being fitted, or changes waiting: nothing to download or mark cut yet
   showStale();
@@ -1074,7 +1060,7 @@ const thisSheet = () => allSheets()[activeSheet];
 $('#saveFilesBtn').onclick = () => (desk ? saveToFolder(allSheets()) : downloadAll());
 $('#saveFilesMore').onclick = (e) => {
   const item = thisSheet();
-  const one = item ? item.file + (item.tp.screwMoves?.length ? ' + screws' : '') : '';
+  const one = item ? item.file + (item.tp?.screwMoves?.length ? ' + screws' : '') : '';
   showMenuAt(e.currentTarget, desk ? [
     [`Save this sheet to folder (${one})`, () => saveToFolder([item]), { disabled: !item }],
     null,
@@ -1109,7 +1095,7 @@ function renderSheet(item) {
   const sh = item.sheet;
   const s = { sheetW: sh.w ?? item.cfg.sheet.sheetW, sheetH: sh.h ?? item.cfg.sheet.sheetH, trim: sh.trim ?? item.cfg.sheet.trim };
   const tx = sh.trimX ?? s.trim;
-  const st = item.tp.stats;
+  const st = item.tp?.stats;
   const pad = 1.5;
   const H = s.sheetH;
   const fy = (y) => H - y; // machine Y up
@@ -1125,8 +1111,9 @@ function renderSheet(item) {
   const flip = (poly) => poly.map(([x, y]) => [x, fy(y)]);
   const partNo = numberPlacements(item.sheet);
   // Check cut carves the whole sheet: drawn first without it, then it follows
-  if (showSim && !item.sim && !item.replanning) setTimeout(() => { if (showSim && !item.sim && !item.replanning && allSheets()[activeSheet] === item) { simulateSheet(item); renderResults(); } }, 30);
-  const sim = showSim && !item.replanning ? item.sim : null;
+  const canSim = item.tp && !item.tpStale && !item.replanning;
+  if (showSim && !item.sim && canSim) setTimeout(() => { if (showSim && !item.sim && item.tp && !item.tpStale && allSheets()[activeSheet] === item) { simulateSheet(item); renderResults(); } }, 30);
+  const sim = showSim && canSim ? item.sim : null;
   if (sim) svg += `<image href="${sim.url}" x="0" y="${H - sim.H}" width="${sim.W}" height="${sim.H}" preserveAspectRatio="none" style="image-rendering:pixelated"/>`;
   item.sheet.placements.forEach((pl, idx) => {
     const g = placedGeometry(pl);
@@ -1155,7 +1142,7 @@ function renderSheet(item) {
     const y0 = above ? b.y1 : b.y0, y1 = above ? b.y1 + 2.2 : b.y0 - 2.2;
     svg += `<g class="rot-handle" data-i="${idx}"><line x1="${hx}" y1="${fy(y0)}" x2="${hx}" y2="${fy(y1)}"/><circle cx="${hx}" cy="${fy(y1)}" r="0.75"><title>Drag to turn ${esc(pl.label || pl.part.name)}${pl.turned ? ` (turned by hand to ${Math.round(pl.xf.a)}°)` : ''}</title></circle></g>`;
   });
-  if (showPaths && !item.replanning) {
+  if (showPaths && item.tp && !item.replanning) {
     let cut = '', rapid = '', tab = '', prev = null;
     for (const m of item.tp.moves) {
       if (m.x == null) continue;
@@ -1176,7 +1163,7 @@ function renderSheet(item) {
     }
   }
   // tabs: where the bit lifts to leave a bridge (hand-placed ones can be dragged in Place tabs)
-  if (item.tp.tabs?.length && (showPaths || tabEdit) && !item.replanning) {
+  if (item.tp?.tabs?.length && (showPaths || tabEdit) && !item.replanning) {
     const tl = item.cfg.tabs?.length || 0.5, tw = Math.max(0.3, item.cfg.tool.dia * 1.6);
     item.tp.tabs.forEach((t, k) => {
       svg += `<g class="tabmark" data-k="${k}" transform="translate(${t.x.toFixed(3)} ${fy(t.y).toFixed(3)}) rotate(${(-t.a * 180 / Math.PI).toFixed(2)})"><rect x="${-tl / 2}" y="${-tw / 2}" width="${tl}" height="${tw}"><title>Tab${sh.tabsManual ? ' (placed by hand)' : ''}${tabEdit ? ' · drag to move, right-click to remove' : ''}</title></rect>${tabEdit ? '<circle class="tabhit" r="1"/>' : ''}</g>`;
@@ -1212,9 +1199,9 @@ function renderSheet(item) {
   $('#sheetView').innerHTML = `
     <div class="sheet-head">
       <strong>${esc(item.title)}</strong>
-      <span class="muted">${item.sheet.placements.length} parts · ${(item.sheet.yield * 100).toFixed(0)}% yield · ${st.cutLength.toFixed(0)}" of cut · ${st.rapidLength.toFixed(0)}" of rapids · ~${st.estMinutes.toFixed(0)} min</span>
+      <span class="muted">${item.sheet.placements.length} parts · ${(item.sheet.yield * 100).toFixed(0)}% yield${st ? ` · ${st.cutLength.toFixed(0)}" of cut · ${st.rapidLength.toFixed(0)}" of rapids · ~${st.estMinutes.toFixed(0)} min` : ''}</span>${!item.tp ? ' <span class="tp-need">no toolpaths yet: click Toolpath</span>' : item.tpStale ? ' <span class="tp-need">toolpaths out of date: click Toolpath</span>' : ''}
       <span class="spacer"></span>
-      <button id="runSimBtn" ${results.pendingShapes ? 'disabled' : ''} title="Play this sheet's file in 3D the way the machine will run it">3D simulation</button>
+      <button id="runSimBtn" ${results.pendingShapes || !item.tp || item.tpStale ? 'disabled' : ''} title="Play this sheet's file in 3D the way the machine will run it">3D simulation</button>
     </div>
     <div class="sheet-tools">
       <span class="seg" role="group" aria-label="Mode">
@@ -1230,7 +1217,8 @@ function renderSheet(item) {
       <span class="legend"><span><i style="background:var(--path)"></i>cut</span><span><i style="background:var(--rapid)"></i>rapid</span><span><i style="background:var(--pocket)"></i>dado</span><span><i style="background:var(--drill)"></i>drill</span>${usesTabs(item.cfg) ? '<span><i style="background:var(--tab)"></i>tab</span>' : ''}</span>
     </div>
     ${moveEdit ? `<p class="small screw-help">Moving parts: drag a part where you want it. A custom shape has a round handle above it: drag the handle to turn the part (in the custom-shape steps, or a half turn when its grain is set; hold Shift for single degrees). If it would come too close to another part's cut, a hold-down screw or the edge of the stock, it goes to the nearest spot where it fits (dashed outline while dragging). Right-click a part to copy, delete or put it back; right-click a spot to paste. ${sh.partsMoved || 0} moved${sh.partsAdded ? `, ${sh.partsAdded} pasted` : ''}${sh.partsRemoved ? `, ${sh.partsRemoved} deleted` : ''} on this sheet. <button id="moveReset" ${sh.partsMoved ? '' : 'disabled'}>Put all back</button>${moveMsg ? `<br><span class="${moveMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(moveMsg.replace(/^!/, ''))}</span>` : ''}${job.pendingQty && Object.keys(job.pendingQty).length ? '<br><strong>Parts added or deleted: Nest &amp; toolpath nests again with the new counts.</strong> Until then deleted parts leave their spot empty and pasted ones stay where you put them.' : ''}</p>` : ''}
-    ${tabEdit ? `<p class="small screw-help">Placing tabs: click near a part's edge to add a tab there (it goes on the bit's path, along that edge, clear of the corners; on a line two parts share it holds both), drag one to move it, right-click to remove it. ${item.tp.tabs?.length || 0} on this sheet${sh.tabsManual ? ' (placed by hand: parts without one get none)' : ''}. <button id="tabAuto" ${sh.tabsManual ? '' : 'disabled'}>Back to automatic</button> <button id="tabClear" ${item.tp.tabs?.length ? '' : 'disabled'}>Remove all</button>${tabMsg ? `<br><span class="${tabMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(tabMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
+    ${tabEdit && !item.tp ? '<p class="small screw-help">Tabs go on the bit\'s path: click <b>Toolpath</b> first, then place them here.</p>' : ''}
+    ${tabEdit && item.tp ? `<p class="small screw-help">Placing tabs: click near a part's edge to add a tab there (it goes on the bit's path, along that edge, clear of the corners; on a line two parts share it holds both), drag one to move it, right-click to remove it. ${item.tp?.tabs?.length || 0} on this sheet${sh.tabsManual ? ' (placed by hand: parts without one get none)' : ''}. <button id="tabAuto" ${sh.tabsManual ? '' : 'disabled'}>Back to automatic</button> <button id="tabClear" ${item.tp?.tabs?.length ? '' : 'disabled'}>Remove all</button>${tabMsg ? `<br><span class="${tabMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(tabMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
     ${screwEdit ? `<p class="small screw-help">Placing screws: click an empty spot to add one, drag to move, right-click to remove. A screw dropped too close to a cut goes to the nearest spot clear of it. Red = a cut or part is too close. ${sh.screws?.length || 0} on this sheet${sh.screwsManual ? ' (placed by hand)' : ''}. <button id="screwAuto" ${sh.screwsManual ? '' : 'disabled'}>Back to automatic</button> <button id="screwClear" ${sh.screws?.length ? '' : 'disabled'}>Remove all</button>${screwMsg ? `<br><span class="${screwMsg.startsWith('!') ? 'move-err' : 'move-note'}">${esc(screwMsg.replace(/^!/, ''))}</span>` : ''}</p>` : ''}
     ${svg}
     ${simNote}
@@ -1258,8 +1246,8 @@ function renderSheet(item) {
     } finally { btn.disabled = false; }
   };
   if (tabEdit) {
-    $('#tabAuto').onclick = () => { tabMsg = ''; setSheetTabs(item, null); };
-    $('#tabClear').onclick = () => { tabMsg = ''; setSheetTabs(item, []); };
+    if ($('#tabAuto')) $('#tabAuto').onclick = () => { tabMsg = ''; setSheetTabs(item, null); };
+    if ($('#tabClear')) $('#tabClear').onclick = () => { tabMsg = ''; setSheetTabs(item, []); };
     wireTabEdit(item, $('#sheetView svg'), fy);
   }
   if (moveEdit && !job.cut && !results.pendingShapes) {
@@ -1284,7 +1272,16 @@ function setSheetTabs(item, list) {
   else delete m[item.idx];
   if (!Object.keys(m).length) delete job.manualTabs[item.mkey];
   item.sheet.tabsManual = list ? m[item.idx] : undefined;
-  replanSheet(item);
+  // shown at once on the bit's path (Back to automatic: the automatic ones come with Toolpath)
+  if (item.tp) {
+    const opt = item.cfg.tabs || {};
+    item.tp = { ...item.tp, tabs: (list || []).map((q) => {
+      const s = tabOnPaths(item.tp.tabPaths || [], [q.x, q.y], item.cfg.tool, opt);
+      const sp = s?.on?.[0]?.span;
+      return { x: s?.c ? s.c[0] : q.x, y: s?.c ? s.c[1] : q.y, a: sp ? Math.atan2(sp[1][1] - sp[0][1], sp[1][0] - sp[0][0]) : 0 };
+    }) };
+  }
+  markEdited(item);
 }
 // Runs a pointermove handler at most once per animation frame, with the latest
 // event; flush() runs a waiting one at once (before the release is handled).
@@ -1303,6 +1300,7 @@ function wireTabEdit(item, svgEl, fy) {
     const p = pt.matrixTransform(svgEl.getScreenCTM().inverse());
     return { x: p.x, y: fy(p.y) };
   };
+  if (!item.tp) return;   // tabs go on the bit's path: Toolpath first
   const opt = item.cfg.tabs || {};
   const okOpt = opt.length > 0 && opt.thickness > 0;
   const snap = (p) => tabOnPaths(item.tp.tabPaths || [], [p.x, p.y], item.cfg.tool, opt);
@@ -1373,12 +1371,12 @@ function refreshSheet(item) {
   const rmin = { side: job.settings.remnants?.minSide ?? 8, area: job.settings.remnants?.minArea ?? 288 };
   applyMoves(item.sheet, job.manualMoves?.[item.mkey]?.[item.idx], { gap: item.cfg.commonLine ? item.cfg.tool.dia : item.cfg.sheet.spacing, remnantMin: rmin,
     edits: job.layoutEdits?.[item.mkey]?.[item.idx], partOf: (k) => item.group.parts.find((p) => partKey(p) === k) });
-  replanSheet(item);
+  dropToolpaths(item);
 }
 
 // ---------- copy, paste and delete parts on a sheet ----------
 // A part deleted from a sheet leaves its spot empty, and a pasted one sits where
-// it was put, until Nest & toolpath nests again with the new counts. Until then
+// it was put, until Nest nests again with the new counts. Until then
 // the change is kept per sheet (job.layoutEdits, like hand moves) and the parts
 // list shows the new count (job.pendingQty: per part id { delta, add, remove }).
 let partClip = null;   // { pl, group } copied in Move parts
@@ -1408,7 +1406,7 @@ function deletePlaced(item, pl) {
   if (pl.added) ed.added = ed.added.filter((a) => !(a.partId === partKey(pl.part) && a.copy === pl.copy));
   else ed.removed.push(moveKey(pl));
   pend(partKey(pl.part), -1, null, { label: pl.label || pl.part.name, cabinet: pl.cabinet ?? pl.part.cabinet });
-  moveMsg = `Deleted ${pl.label || pl.part.name} (its spot stays empty until Nest & toolpath nests again).`;
+  moveMsg = `Deleted ${pl.label || pl.part.name} (its spot stays empty until Nest nests again).`;
   renderParts();
   refreshSheet(item);
 }
@@ -1687,7 +1685,7 @@ function wireScrewEdit(item, svgEl, fy) {
     drag.f = f;
     drag.moved = true;
     drag.g.setAttribute('transform', `translate(${p.x} ${fy(p.y)})`);
-    const c = screwCheck({ ...sh, screws: [p] }, item.tp.moves, item.cfg)[0];
+    const c = item.tp ? screwCheck({ ...sh, screws: [p] }, item.tp.moves, item.cfg)[0] : { ok: true };
     drag.g.classList.toggle('bad', !c.ok);
   });
   svgEl.addEventListener('pointermove', onMove);
@@ -2115,6 +2113,7 @@ window.cabinetCam = {
 $('#nestBtn').onclick = async () => { activeSheet = 0; await searchNests(false); $('#resultsCard').scrollIntoView({ behavior: 'smooth' }); };
 $('#searchAgain').onclick = () => searchNests(true);
 $('#updateSheets').onclick = () => searchNests(false);
+$('#toolpathBtn').onclick = () => planAll();
 $('#jobName').addEventListener('input', (e) => { job.name = e.target.value; });
 
 $('#saveJob').onclick = (e) => busy(e.target, async () => {
