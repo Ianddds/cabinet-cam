@@ -37,8 +37,8 @@ Click **load the sample job** (in the empty parts list, or **Help → Load the s
 
 ## Where things are
 
-- **Top bar:** job name, Save, Open job, Onshape status.
-- **Left column:** Source (Part Studio URL, Get parts), then the settings cards: Sheet, Remnants, Tools, Cutting (with Hold parts with), Machine.
+- **Top bar:** job name, Save, Open job, **Settings** (opens the Machine settings — post, arcs, ShopBot options, machine profile, park position — in a panel under it; Esc or a click outside closes it), Onshape status.
+- **Left column:** stays in view while the page scrolls. Source (Part Studio URL, Get parts) is fixed at the top; the settings cards under it — Sheet, Remnants, Tools, Cutting (with Hold parts with) — scroll on their own.
 - **Parts:** the list, cabinet filter, and the **Nest** and **Toolpath** buttons in a bar pinned to the bottom of the card while the list scrolls. Each material's heading row has its own tick box: untick it to leave out every part in that material (tick it to put them all back); it shows a dash when only some are ticked. Clicking the rest of the heading still folds the material away.
 - **Sheets header:** **Try another nest** · **Print ▾** (sheet layouts, this sheet's layout, construction sheets, labels, cut list) · **Save all to folder** / **Download all** with **▾** (this sheet only, download instead, the G-code folder) · **Mark as cut…**
 - **Changes wait for Update sheets.** Once a job is nested, changing parts (counts, ticks, grain, the cabinet filter), tools or settings doesn't re-nest or re-plan anything: a yellow bar on the Sheets card says the sheets are out of date, with **Update sheets** (same as **Nest**: it searches only materials whose parts changed, and just lays the sheets out again otherwise; then click **Toolpath**). Until then Save, Print and Mark as cut are greyed out, so nothing out of date gets cut or printed. Big jobs no longer lag on every edit.

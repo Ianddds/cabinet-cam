@@ -444,7 +444,21 @@ function renderSettings() {
   $('#skinF').hidden = !usesSkin(job.settings);
 }
 
-document.querySelector('.side').addEventListener('change', (e) => {
+// Settings tab (top bar): the Machine card in a panel under it
+{
+  const tab = $('#settingsTab'), panel = $('#settingsPanel');
+  const show = (on) => { panel.hidden = !on; tab.setAttribute('aria-expanded', on ? 'true' : 'false'); };
+  tab.onclick = (e) => { e.stopPropagation(); show(panel.hidden); };
+  $('#settingsClose').onclick = () => show(false);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !panel.hidden) show(false); });
+  document.addEventListener('mousedown', (e) => { if (!panel.hidden && !panel.contains(e.target) && e.target !== tab) show(false); });
+  // the left column and the panel sit just under the top bar, whatever its height
+  const topbarH = () => document.documentElement.style.setProperty('--topbar-h', `${document.querySelector('.topbar').offsetHeight}px`);
+  topbarH();
+  window.addEventListener('resize', topbarH);
+}
+
+const onSettingChange = (e) => {
   const el = e.target;
   if (!el.dataset.path) return;
   let v = el.type === 'checkbox' ? el.checked : el.value;
@@ -455,7 +469,9 @@ document.querySelector('.side').addEventListener('change', (e) => {
   rememberSettings();
   renderSettings();
   markStale(); // the sheets wait for Update sheets (re-planning a big job on every change lags)
-});
+};
+document.querySelector('.side').addEventListener('change', onSettingChange);
+$('#settingsPanel').addEventListener('change', onSettingChange);
 
 // label settings only change the labels
 $('#labelsPanel').addEventListener('change', (e) => {
@@ -469,7 +485,6 @@ $('#labelsPanel').addEventListener('change', (e) => {
   renderLabels();
 });
 
-$('#resetSettings').onclick = () => { job.settings = structuredClone(DEFAULT_SETTINGS); rememberSettings(); renderSettings(); };
 
 function settingsProblems(s, tl) {
   const out = [...tl.notes];

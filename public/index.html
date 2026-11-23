@@ -13,9 +13,50 @@
     <input id="jobName" class="job-name" placeholder="Job name" />
     <button id="saveJob">Save</button>
     <select id="openJob"><option value="">Open job…</option></select>
+    <button id="settingsTab" class="top-tab" aria-expanded="false" title="Machine settings: post, machine profile, park position">Settings</button>
     <span class="spacer"></span>
     <span id="onshapeStatus" class="status">Onshape: …</span>
   </header>
+  <div id="settingsPanel" class="settings-panel" hidden>
+    <section class="card">
+      <div class="card-head"><h2>Machine</h2><button type="button" class="link" id="settingsClose" title="Close (Esc)">Close</button></div>
+        <label class="field">Post
+          <select data-path="post" id="postSel">
+            <optgroup label="Built in">
+              <option value="fluidnc">FluidNC (.nc)</option>
+              <option value="linuxcnc">LinuxCNC (.ngc)</option>
+              <option value="sbp">ShopBot (.sbp)</option>
+            </optgroup>
+            <optgroup label="Post files (.pp)" id="postFilesGroup"></optgroup>
+          </select>
+        </label>
+        <div class="post-files small">
+          <button type="button" class="link mini" id="postImport" title="Add a Vectric-format post (.pp), e.g. from VCarve / Aspire / PartWorks. It's saved in this computer's posts folder.">Import post (.pp)…</button>
+          <button type="button" class="link mini" id="postRemove" hidden>Remove this post file</button>
+          <input type="file" id="postFile" accept=".pp,.txt" hidden />
+          <div class="muted" id="postInfo"></div>
+        </div>
+        <label class="check" id="arcsF" title="Curves (rounded corners, cups, reliefs, the pocket spiral) go out as G2/G3 arcs instead of many short lines: smaller files and smoother motion. ShopBot files use CG arcs."><input type="checkbox" data-path="arcs" /> Arcs (G2/G3 / CG)</label>
+        <div id="sbpOpts" class="grid2">
+          <label class="field">Spindle on<input data-path="sbpSpindleOn" /></label>
+          <label class="field">Spindle off<input data-path="sbpSpindleOff" /></label>
+          <label class="field" title="Bit changes go out as &amp;Tool = n then C9 (ShopBot's tool-change routine). Tool numbers come from the tool library and must be 1 to this number.">Highest tool #<input type="number" step="1" min="1" data-path="sbpMaxTool" /></label>
+          <label class="check span2"><input type="checkbox" data-path="sbpSetRpm" /> Send TR (VFD RPM)</label>
+        </div>
+        <h3 class="small" title="From your controller's settings (FluidNC: max_rate_mm_per_min and acceleration_mm_per_sec2 per axis; divide mm by 25.4)">Machine profile</h3>
+        <div class="grid2">
+          <label class="field">Max X/Y ipm<input type="number" step="10" min="1" data-path="machine.maxXY" /></label>
+          <label class="field">Max Z ipm<input type="number" step="5" min="1" data-path="machine.maxZ" /></label>
+          <label class="field">Accel X/Y in/s²<input type="number" step="1" min="0.1" data-path="machine.accelXY" /></label>
+          <label class="field">Accel Z in/s²<input type="number" step="1" min="0.1" data-path="machine.accelZ" /></label>
+          <label class="field span2" title="Stop, swap the bit, re-zero, start">Bit change (seconds)<input type="number" step="10" min="0" data-path="machine.toolChangeSec" /></label>
+        </div>
+        <div class="grid2">
+          <label class="field">Park X<input type="number" step="1" data-path="park.x" /></label>
+          <label class="field">Park Y<input type="number" step="1" data-path="park.y" /></label>
+        </div>
+    </section>
+  </div>
 
   <main class="layout">
     <aside class="side">
@@ -31,6 +72,7 @@
         <button id="saveRaw" class="link" hidden>Save raw Onshape data (for troubleshooting)</button>
       </section>
 
+      <div class="side-scroll">
       <section class="card">
         <h2>Sheet</h2>
         <div class="grid2">
@@ -134,45 +176,7 @@
         </div>
       </section>
 
-      <section class="card">
-        <h2>Machine</h2>
-        <label class="field">Post
-          <select data-path="post" id="postSel">
-            <optgroup label="Built in">
-              <option value="fluidnc">FluidNC (.nc)</option>
-              <option value="linuxcnc">LinuxCNC (.ngc)</option>
-              <option value="sbp">ShopBot (.sbp)</option>
-            </optgroup>
-            <optgroup label="Post files (.pp)" id="postFilesGroup"></optgroup>
-          </select>
-        </label>
-        <div class="post-files small">
-          <button type="button" class="link mini" id="postImport" title="Add a Vectric-format post (.pp), e.g. from VCarve / Aspire / PartWorks. It's saved in this computer's posts folder.">Import post (.pp)…</button>
-          <button type="button" class="link mini" id="postRemove" hidden>Remove this post file</button>
-          <input type="file" id="postFile" accept=".pp,.txt" hidden />
-          <div class="muted" id="postInfo"></div>
-        </div>
-        <label class="check" id="arcsF" title="Curves (rounded corners, cups, reliefs, the pocket spiral) go out as G2/G3 arcs instead of many short lines: smaller files and smoother motion. ShopBot files use CG arcs."><input type="checkbox" data-path="arcs" /> Arcs (G2/G3 / CG)</label>
-        <div id="sbpOpts" class="grid2">
-          <label class="field">Spindle on<input data-path="sbpSpindleOn" /></label>
-          <label class="field">Spindle off<input data-path="sbpSpindleOff" /></label>
-          <label class="field" title="Bit changes go out as &amp;Tool = n then C9 (ShopBot's tool-change routine). Tool numbers come from the tool library and must be 1 to this number.">Highest tool #<input type="number" step="1" min="1" data-path="sbpMaxTool" /></label>
-          <label class="check span2"><input type="checkbox" data-path="sbpSetRpm" /> Send TR (VFD RPM)</label>
-        </div>
-        <h3 class="small" title="From your controller's settings (FluidNC: max_rate_mm_per_min and acceleration_mm_per_sec2 per axis; divide mm by 25.4)">Machine profile</h3>
-        <div class="grid2">
-          <label class="field">Max X/Y ipm<input type="number" step="10" min="1" data-path="machine.maxXY" /></label>
-          <label class="field">Max Z ipm<input type="number" step="5" min="1" data-path="machine.maxZ" /></label>
-          <label class="field">Accel X/Y in/s²<input type="number" step="1" min="0.1" data-path="machine.accelXY" /></label>
-          <label class="field">Accel Z in/s²<input type="number" step="1" min="0.1" data-path="machine.accelZ" /></label>
-          <label class="field span2" title="Stop, swap the bit, re-zero, start">Bit change (seconds)<input type="number" step="10" min="0" data-path="machine.toolChangeSec" /></label>
-        </div>
-        <div class="grid2">
-          <label class="field">Park X<input type="number" step="1" data-path="park.x" /></label>
-          <label class="field">Park Y<input type="number" step="1" data-path="park.y" /></label>
-        </div>
-        <button id="resetSettings" class="link">Reset settings to defaults</button>
-      </section>
+      </div>
     </aside>
 
     <section class="main">

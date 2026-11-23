@@ -57,7 +57,24 @@ input[type="checkbox"] { width: auto; }
 .status a { color: var(--accent); }
 
 .layout { display: grid; grid-template-columns: 330px 1fr; gap: 14px; padding: 14px; align-items: start; }
-.side { display: flex; flex-direction: column; gap: 12px; }
+/* left column: stays in view; Source fixed at the top, the other cards scroll on their own */
+.side {
+  display: flex; flex-direction: column; gap: 12px;
+  position: sticky; top: calc(var(--topbar-h, 52px) + 14px);
+  max-height: calc(100vh - var(--topbar-h, 52px) - 28px);
+}
+.side > .card:first-child { flex: none; }
+.side-scroll {
+  flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px;
+  padding-right: 4px; margin-right: -4px; overscroll-behavior: contain;
+}
+/* Settings tab in the top bar and its panel */
+.top-tab[aria-expanded="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.settings-panel {
+  position: fixed; top: calc(var(--topbar-h, 52px) + 6px); left: 14px; z-index: 20;
+  width: 360px; max-height: calc(100vh - var(--topbar-h, 52px) - 20px); overflow-y: auto;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18); border-radius: 10px;
+}
 .main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
 .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 10px; color: var(--muted); }
@@ -112,6 +129,8 @@ tr.off td { opacity: 0.45; }
 
 @media (max-width: 900px) {
   .layout { grid-template-columns: 1fr; }
+  .side { position: static; max-height: none; }
+  .side-scroll { overflow: visible; }
   .topbar { flex-wrap: wrap; }
 }
 
@@ -304,3 +323,4 @@ tr.group td.gtick { cursor: default; }
 table.cut-list th.num { text-align: right; }
 table.cut-list { border: 1px solid var(--line, #ddd); }
 table.cut-list th + th, table.cut-list td + td { border-left: 1px solid var(--line, #ddd); }
+.settings-panel .card-head { display: flex; align-items: center; justify-content: space-between; }
