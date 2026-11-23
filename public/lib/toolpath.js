@@ -9,9 +9,19 @@ import { offset, union, intersect, difference, inRegion, area } from './clip.js'
 import { usesSkin, usesTabs } from './settings.js';
 import { machineTime } from './machine.js';
 
-function levels(target, step) {
+function levels(target, step, minFirst = 0) {
   const out = [];
   const n = Math.max(1, Math.ceil(target / step - 1e-6));
+  // compression bits: the first pass (the one that cuts the surface) is at
+  // least minFirst, never more than the stepdown; the rest split what's left
+  // equally (once the surface is cut their depth doesn't matter)
+  const first = target / n;
+  if (minFirst > 0 && n > 1 && first < minFirst - 1e-9) {
+    const f = Math.min(minFirst, step, target);
+    out.push(-f);
+    for (const z of levels(target - f, step)) out.push(z - f);
+    return out;
+  }
   for (let i = 1; i <= n; i++) out.push(-Math.min(target, (target * i) / n));
   return out;
 }
@@ -828,7 +838,7 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
   const lv = [];
   let fromRecords = false;
   const prevZ = new Map();
-  for (const [ci, cl] of classes.entries()) for (const z of levels(cl.d, tool.stepdown)) {
+  for (const [ci, cl] of classes.entries()) for (const z of levels(cl.d, tool.stepdown, tool.minStepdown)) {
     const zTop = prevZ.get(ci) ?? 0;   // material top here: the last level of this depth, or the sheet top
     prevZ.set(ci, z);
     const members = cl.members;
@@ -2672,7 +2682,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
     }
   };
 
-  const roughZs = levels(roughTarget, tool.stepdown);
+  const roughZs = levels(roughTarget, tool.stepdown, tool.minStepdown);
   if (skin > 0) {
     pb.comment(`Profiles to ${roughTarget.toFixed(3)} (onion skin ${skin.toFixed(3)})${interleave ? ', each part\'s dados first' : ''}`);
     runList(items, roughZs, null, interleave, new Set(), cfg.commonLine && items.some((x) => x.shared?.length) ? newPass() : null);
@@ -2685,7 +2695,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
   // Offcuts kept as remnants: cut free along their inside edges (the edges on
   // the stock's own edges are left as they are), last, full depth.
   if (cfg.remnants?.cutFree && sheet.offcuts?.length && sheet.w && sheet.h) {
-    const fullZs = levels(full, tool.stepdown);
+    const fullZs = levels(full, tool.stepdown, tool.minStepdown);
     for (const oc of sheet.offcuts) {
       for (const line of offcutCutLines(oc, sheet.w, sheet.h, r)) {
         pb.comment(`Cut offcut free ${oc.w.toFixed(2)} x ${oc.h.toFixed(2)} (keep as a remnant)`);
@@ -2724,6 +2734,30 @@ function sheetPlan(sheet, cfg, joinSkip) {
     sb.toolchange(screwTool, `${screwTool.name || ''} ${screwTool.dia}in`);
     drillScrews(screwTool, sb, false);
     screwMoves = sb.moves;
+  }
+  // Compression bits: a routed cut whose first pass from the top is shallower
+  // than the bit's min stepdown leaves the top to the upcut part (fuzz). Warned,
+  // never changed, so the file can still be cut. Drilling isn't checked.
+  {
+    const shallow = (t, depth) => t?.minStepdown > 0 && depth < t.minStepdown - 1e-6;
+    const fmt = (v) => v.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+    const pk = [];
+    for (const pl of plans) {
+      const seen = new Set();
+      for (const L of pl.levels) {
+        if (seen.has(L.cls)) continue;
+        seen.add(L.cls);
+        const d = (L.zTop || 0) - L.z;
+        if (Math.abs(L.zTop || 0) < 1e-6 && shallow(dado, d)) pk.push({ label: pl.label, d });
+      }
+    }
+    if (pk.length) {
+      const min = Math.min(...pk.map((q) => q.d));
+      const names = [...new Set(pk.map((q) => q.label))];
+      warnings.push(`Min stepdown: ${pk.length} dado / rabbet pass${pk.length === 1 ? '' : 'es'} start${pk.length === 1 ? 's' : ''} shallower than ${dado.name}'s ${fmt(dado.minStepdown)}" (shallowest ${fmt(min)}") on ${names.slice(0, 4).join(', ')}${names.length > 4 ? '…' : ''} — the top edge may fuzz`);
+    }
+    const firstProfile = roughZs.length ? -roughZs[0] : 0;
+    if (items.length && shallow(tool, firstProfile)) warnings.push(`Min stepdown: the profiles' first pass is ${fmt(firstProfile)}" deep, shallower than ${tool.name}'s ${fmt(tool.minStepdown)}" — the top edge may fuzz (raise the bit's stepdown so the passes come out deeper)`);
   }
   return { joins: joinCount, moves: pb.moves, screwMoves, warnings, tabs: tabMarks, tabPaths, stats: { sharedLength: sharedTotal, cutLength: cutLen, rapidLength: rapidLen, estMinutes: mt.total / 60, time: mt, minX, minY, maxX, maxY, minZ } };
 }

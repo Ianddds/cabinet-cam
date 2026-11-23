@@ -1970,6 +1970,26 @@ function distSeg(p, a, b) {
   check(rap < 5, `side with top, bottom and back dados: ${rap.toFixed(1)}" of rapids inside the dados (was 200")`);
 }
 
+// min stepdown (compression bits): a routed first pass shallower than it is
+// warned about, the file is still made; drilling is never checked
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const lib = DEFAULT_LIBRARY.map((t) => (t.id === 't-38comp' ? { ...t, minStepdown: 0.3 } : { ...t, minStepdown: 5 }));
+  const tl = resolveTools(s0, lib, []);
+  const g = groupParts(normalizeAll(sampleKitchen()).parts.map((p) => ({ ...p, include: true })))[0];
+  const sh = nestParts(g.parts, { ...s0.sheet, respectGrain: true, searchMs: 50 }).sheets.find((x) => x.placements.some((pl) => pl.part.pockets?.length));
+  const tp = sheetToolpaths(sh, { ...s0, ...tl, thickness: g.thickness });
+  const w = tp.warnings.filter((x) => x.startsWith('Min stepdown'));
+  check(w.length === 1 && /dado/.test(w[0]) && tp.moves.length > 0, `min stepdown: one warning for the shallow dados, file still made (${w.join(' | ') || 'none'})`);
+  const tp2 = sheetToolpaths(sh, { ...s0, ...resolveTools(s0, DEFAULT_LIBRARY, []), thickness: g.thickness });
+  check(!tp2.warnings.some((x) => x.startsWith('Min stepdown')), 'min stepdown: off (0 / not set) = no warning');
+  // the first pass (the one that cuts the surface) is at least the min; the rest split what's left
+  const lib3 = DEFAULT_LIBRARY.map((t) => (t.id === 't-38comp' ? { ...t, minStepdown: 0.38 } : t));
+  const tp3 = sheetToolpaths(sh, { ...s0, ...resolveTools(s0, lib3, []), thickness: g.thickness });
+  const pz = [...new Set(tp3.moves.filter((m) => m.op === 'profile' && m.g === 1 && !m.plunge && m.z < 0).map((m) => +m.z.toFixed(4)))].sort((a, b) => b - a);
+  check(Math.abs(pz[0] + 0.38) < 1e-6 && !tp3.warnings.some((x) => /profiles' first pass/.test(x)), `min stepdown: first profile pass at the min, not split equally (passes ${pz.join(', ')})`);
+}
+
 console.log(`\npocket lifts after first entry: ${liftTotal} across ${pocketTotal} pockets`);
 check(arcTotal > 20, `G-code uses arcs (${arcTotal} G2/G3 in the sample job)`);
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');

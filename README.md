@@ -86,6 +86,8 @@ Grain `length` = along the part's long side. The sheet's grain runs along X (the
 
 The **tool library** (Tools → Edit tool library…) holds every bit's defaults and is saved on the server in `data/tools.json`, so everyone using the app shares it. Every bit, router or drill, has the same fields: diameter, RPM, cut ipm, **plunge entry ipm**, **plunge entry depth**, **plunge ipm (after entry)**, stepdown, stepover and peck.
 
+**Min stepdown** (compression bits; 0 or blank = off): the shallowest first pass that still reaches past the bit's upcut part. Passes are normally split equally; with a min set, the first pass (the one that cuts the surface) is at least the min (never more than the stepdown) and the rest split what's left — a 0.5" dado with a 0.4" stepdown and a 0.3" min is 0.3" then 0.2", not 0.25" twice. A cut shallower than the min in total (a 1/4" dado with a 5/16" min) can't be helped: the sheet shows a warning naming the parts, and the G-code is still made, so you decide whether to cut it. Drilling is never checked.
+
 Each job picks a profile tool, a dado tool (or "same as profile") and which tools may drill holes. Saving a job stores a copy of the tools it used, so an old job regenerates the same code after the library is retuned (or a tool is deleted).
 
 Every plunge into the sheet's face — profiles, dados and drilling — runs at the plunge entry ipm down to the plunge entry depth, then at the plunge ipm (after entry). The tool rapids down to 0.05" above the surface before feeding. A stepdown into floor an earlier level of the same pocket already cleared has no face to enter: the tool rapids down to 0.02" above that floor and plunges the rest at the plunge ipm, with no slow entry.

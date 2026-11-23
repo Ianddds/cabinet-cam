@@ -10,6 +10,9 @@
 //   stepover   fraction of the diameter between pocket rows (used as typed;
 //              default 0.85, what pockets have always been cleared at)
 //   peck       drilling: peck depth (in), 0 = one plunge
+//   minStepdown compression bits: the shallowest first pass that still reaches
+//              past the upcut part (in), 0 = off. A routed cut (dado, profile)
+//              whose first pass is shallower gets a warning; drilling is never checked
 // The library lives on the server (data/tools.json); jobs store the tool ids
 // they use plus a snapshot copy, so old jobs regenerate the same code.
 
@@ -30,6 +33,7 @@ export const TOOL_FIELDS = [
   ['num', 'Tool #', 1], ['dia', 'Dia (in)', 0.001], ['rpm', 'RPM', 500], ['feed', 'Cut ipm', 5],
   ['entryFeed', 'Plunge entry ipm', 1], ['entryDepth', 'Plunge entry depth', 0.01], ['drillFeed', 'Plunge ipm (after entry)', 1],
   ['stepdown', 'Stepdown', 0.05], ['stepover', 'Stepover ×D', 0.05], ['peck', 'Peck (0 = off)', 0.05],
+  ['minStepdown', 'Min stepdown (compression, 0 = off)', 0.01],
 ];
 
 export function newTool(base = {}, library = []) {
