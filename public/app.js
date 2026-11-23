@@ -296,7 +296,8 @@ function cutListHtml(rows) {
     html += `<tr><td class="num">${r.qty}</td><td>${esc(r.part)}</td><td class="num">${fraction(r.length)}</td><td class="num">${fraction(r.width)}</td>
       <td class="num">${fraction(r.thickness)}</td><td>${esc(r.cabinets)}</td><td class="muted small">${f3(r.length)} × ${f3(r.width)} × ${f3(r.thickness)}</td></tr>`;
   }
-  return `<table><thead><tr><th>Qty</th><th>Part</th><th>Length</th><th>Width</th><th>Thk</th><th>Cabinets</th><th>Decimal</th></tr></thead><tbody>${html}</tbody></table>`;
+  // headings aligned like their columns (numbers right), lines between columns
+  return `<table class="cut-list"><thead><tr><th class="num">Qty</th><th>Part</th><th class="num">Length</th><th class="num">Width</th><th class="num">Thk</th><th>Cabinets</th><th>Decimal</th></tr></thead><tbody>${html}</tbody></table>`;
 }
 
 function renderCutList() {
@@ -2113,7 +2114,8 @@ $('#cutListPrint').onclick = () => {
     @page{size:portrait;margin:0.5in}
     body{font:13px system-ui,sans-serif;margin:0;color:#111}h1{font-size:18px;margin:0 0 4px}p{margin:0 0 14px;color:#555}
     table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #ccc;padding:5px 8px;text-align:left}
-    th{font-size:11px;text-transform:uppercase;color:#555}td.num{text-align:right;font-variant-numeric:tabular-nums}
+    th{font-size:11px;text-transform:uppercase;color:#555}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+    table.cut-list th+th,table.cut-list td+td{border-left:1px solid #ccc}table.cut-list{border:1px solid #ccc}
     tr.group td{background:#eee;font-weight:600}.muted{color:#777}.small{font-size:11px}</style></head><body>
     <section class="page"><h1>Cut list — ${esc(job.name || '')}</h1><p>${new Date().toLocaleDateString()} · parts not cut on the CNC</p>
     ${cutListHtml(cutListRows(runParts().filter((p) => p.qty > 0)))}</section></body></html>`, { title: 'Cut list', orient: 'portrait', margin: 0.5, kind: 'cutlist' });

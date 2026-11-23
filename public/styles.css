@@ -299,3 +299,8 @@ tr.group td.gtick { cursor: default; }
 /* sheets waiting for Toolpath */
 .tp-need { color: #b8860b; font-weight: 600; font-size: 12px; }
 .parts-foot #toolpathBtn { margin-left: 8px; }
+
+/* cut list: headings over their columns (numbers right), lines between columns */
+table.cut-list th.num { text-align: right; }
+table.cut-list { border: 1px solid var(--line, #ddd); }
+table.cut-list th + th, table.cut-list td + td { border-left: 1px solid var(--line, #ddd); }
