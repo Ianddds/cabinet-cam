@@ -37,7 +37,8 @@ Click **load the sample job** (in the empty parts list, or **Help → Load the s
 
 ## Where things are
 
-- **Top bar:** job name, Save, Open job, **Settings** (opens the Machine settings — post, arcs, ShopBot options, machine profile, park position — in a panel under it; Esc or a click outside closes it), Onshape status.
+- **Top bar:** job name, Save, Open job, Onshape status.
+- **Settings** (desktop app: the **Settings** menu, left of Help → *Machine settings…*, Ctrl+,; in a browser: the Settings button in the top bar) opens the Machine settings — post, arcs, ShopBot options, machine profile, park position — in a panel under the top bar; Esc or a click outside closes it.
 - **Left column:** stays in view while the page scrolls. Source (Part Studio URL, Get parts) is fixed at the top; the settings cards under it — Sheet, Remnants, Tools, Cutting (with Hold parts with) — scroll on their own.
 - **Parts:** the list, cabinet filter, and the **Nest** and **Toolpath** buttons in a bar pinned to the bottom of the card while the list scrolls. Each material's heading row has its own tick box: untick it to leave out every part in that material (tick it to put them all back); it shows a dash when only some are ticked. Clicking the rest of the heading still folds the material away.
 - **Sheets header:** **Try another nest** · **Print ▾** (sheet layouts, this sheet's layout, construction sheets, labels, cut list) · **Save all to folder** / **Download all** with **▾** (this sheet only, download instead, the G-code folder) · **Mark as cut…**

@@ -120,6 +120,10 @@ function buildMenu() {
     ] },
     { label: 'Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
     { label: 'View', submenu: [{ role: 'reload' }, { role: 'forceReload' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }, { role: 'toggleDevTools' }] },
+    // Settings, left of Help: opens the Machine settings panel in the page
+    { label: 'Settings', submenu: [
+      { label: 'Machine settings…', accelerator: 'CmdOrCtrl+,', click: () => win?.webContents.executeJavaScript('window.cabinetCam && window.cabinetCam.openSettings()') },
+    ] },
     { label: 'Help', submenu: [
       { label: 'Check for updates…', click: () => checkForUpdates(true) },
       { type: 'separator' },

@@ -285,7 +285,25 @@ $('#groupsToggle').onclick = () => {
   renderParts();
 };
 
-function cutListHtml(rows) {
+// Cut list sort: click a heading to sort by it (again to reverse). Rows stay
+// grouped by material; the sort is within each material. Remembered on this PC,
+// and the printed cut list uses the same order.
+const CUT_SORT_KEY = 'cabinetcam.cutlistSort';
+let cutSort = (() => { try { return JSON.parse(localStorage.getItem(CUT_SORT_KEY)) || null; } catch { return null; } })();
+const CUT_COLS = [
+  ['qty', 'Qty', true], ['part', 'Part', false], ['length', 'Length', true], ['width', 'Width', true],
+  ['thickness', 'Thk', true], ['cabinets', 'Cabinets', false], ['decimal', 'Decimal', false],
+];
+function sortCutRows(rows) {
+  if (!cutSort) return rows;
+  const k = cutSort.key === 'decimal' ? 'length' : cutSort.key;
+  const dir = cutSort.dir === 'desc' ? -1 : 1;
+  const cmp = (a, b) => (typeof a[k] === 'number' ? a[k] - b[k] : String(a[k] ?? '').localeCompare(String(b[k] ?? ''), undefined, { numeric: true }));
+  return rows.map((r, i) => [r, i]).sort(([a, i], [b, j]) => a.material.localeCompare(b.material) || dir * cmp(a, b) || i - j).map(([r]) => r);
+}
+
+function cutListHtml(rows, sortable = false) {
+  rows = sortCutRows(rows);
   let html = '', mat = null;
   for (const r of rows) {
     if (r.material !== mat) {
@@ -297,7 +315,13 @@ function cutListHtml(rows) {
       <td class="num">${fraction(r.thickness)}</td><td>${esc(r.cabinets)}</td><td class="muted small">${f3(r.length)} × ${f3(r.width)} × ${f3(r.thickness)}</td></tr>`;
   }
   // headings aligned like their columns (numbers right), lines between columns
-  return `<table class="cut-list"><thead><tr><th class="num">Qty</th><th>Part</th><th class="num">Length</th><th class="num">Width</th><th class="num">Thk</th><th>Cabinets</th><th>Decimal</th></tr></thead><tbody>${html}</tbody></table>`;
+  const head = CUT_COLS.map(([key, label, num]) => {
+    const on = cutSort?.key === key;
+    const arrow = on ? (cutSort.dir === 'desc' ? ' ▼' : ' ▲') : '';
+    const cls = [num ? 'num' : '', sortable ? 'sortable' : '', on ? 'sorted' : ''].filter(Boolean).join(' ');
+    return `<th${cls ? ` class="${cls}"` : ''}${sortable ? ` data-sort="${key}" title="Sort by ${label.toLowerCase()} (click again to reverse)"` : ''}>${label}${arrow}</th>`;
+  }).join('');
+  return `<table class="cut-list"><thead><tr>${head}</tr></thead><tbody>${html}</tbody></table>`;
 }
 
 function renderCutList() {
@@ -306,8 +330,18 @@ function renderCutList() {
   if (!rows.length) return;
   const pcs = rows.reduce((a, r) => a + r.qty, 0);
   $('#cutListSummary').textContent = `${pcs} pcs · ${rows.length} line${rows.length === 1 ? '' : 's'}`;
-  $('#cutListTable').innerHTML = cutListHtml(rows);
+  $('#cutListTable').innerHTML = cutListHtml(rows, true);
 }
+$('#cutListTable').addEventListener('click', (e) => {
+  const th = e.target.closest('th[data-sort]');
+  if (!th) return;
+  const key = th.dataset.sort;
+  // first click: numbers biggest first, text A to Z; again reverses
+  const num = CUT_COLS.find((c) => c[0] === key)?.[2];
+  cutSort = cutSort?.key === key ? { key, dir: cutSort.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: num ? 'desc' : 'asc' };
+  try { localStorage.setItem(CUT_SORT_KEY, JSON.stringify(cutSort)); } catch { /* not kept */ }
+  renderCutList();
+});
 
 $('#partsTable').addEventListener('change', (e) => {
   // the material's tick: every part in it on or off
@@ -444,10 +478,15 @@ function renderSettings() {
   $('#skinF').hidden = !usesSkin(job.settings);
 }
 
-// Settings tab (top bar): the Machine card in a panel under it
+// Settings: the Machine card in a panel under the top bar. The desktop app
+// opens it from its Settings menu (left of Help); in a browser, the top bar's
+// Settings button does.
+let showSettings = () => {};
 {
   const tab = $('#settingsTab'), panel = $('#settingsPanel');
+  if (desk) tab.hidden = true;
   const show = (on) => { panel.hidden = !on; tab.setAttribute('aria-expanded', on ? 'true' : 'false'); };
+  showSettings = show;
   tab.onclick = (e) => { e.stopPropagation(); show(panel.hidden); };
   $('#settingsClose').onclick = () => show(false);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !panel.hidden) show(false); });
@@ -2141,10 +2180,11 @@ $('#saveRaw').onclick = () => {
 };
 const loadSample = (btn) => busy(btn || $('#fetchParts'), async () => setParts(await api('/api/sample')));
 $('#partsTable').addEventListener('click', (e) => { const b = e.target.closest('[data-sample]'); if (b) loadSample(b); });
-// what the desktop app's Help menu asks for (electron/main.js)
+// what the desktop app's Help and Settings menus ask for (electron/main.js)
 window.cabinetCam = {
   loadSample: () => loadSample(),
   saveRaw: () => (lastRaw ? $('#saveRaw').click() : showMessages([{ text: 'No Onshape data yet: Get parts first.' }])),
+  openSettings: () => showSettings(true),
 };
 $('#nestBtn').onclick = async () => { activeSheet = 0; await searchNests(false); $('#resultsCard').scrollIntoView({ behavior: 'smooth' }); };
 $('#searchAgain').onclick = () => searchNests(true);

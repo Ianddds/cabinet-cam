@@ -324,3 +324,6 @@ table.cut-list th.num { text-align: right; }
 table.cut-list { border: 1px solid var(--line, #ddd); }
 table.cut-list th + th, table.cut-list td + td { border-left: 1px solid var(--line, #ddd); }
 .settings-panel .card-head { display: flex; align-items: center; justify-content: space-between; }
+table.cut-list th.sortable { cursor: pointer; user-select: none; }
+table.cut-list th.sortable:hover { color: var(--ink, #222); }
+table.cut-list th.sorted { color: var(--accent); }
