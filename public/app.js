@@ -249,9 +249,10 @@ $('#cabFilter').addEventListener('click', (e) => {
 
 // ---------- parts table ----------
 // Grain cell: override select; "Auto" shows what the job rule / model gives.
+// Cut-list parts (not cut on the CNC) turn either way on the cut list's sheet
+// maps unless a grain is picked here.
 function grainCell(p) {
-  if (p.cnc === false) return '';
-  const auto = effectiveGrain({ ...p, grainOverride: '' });
+  const auto = p.cnc === false ? 'any' : effectiveGrain({ ...p, grainOverride: '' });
   const opts = [['', `Auto: ${grainLabel(auto)}`], ...GRAIN_CHOICES];
   return `<select data-k="grain" class="${p.grainOverride ? 'overridden' : ''}">${opts.map(([v, l]) =>
     `<option value="${v}" ${v === (p.grainOverride || '') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
@@ -287,7 +288,7 @@ function renderParts() {
       rows += `<tr class="${p.include && runQty > 0 ? '' : 'off'}" data-i="${i}">
         <td><input type="checkbox" data-k="include" ${p.include ? 'checked' : ''}></td>
         <td class="name-cell" title="${esc(names)}">${esc(p.name)}${p.sourceNames?.length > 1 ? ` <span class="muted">+${p.sourceNames.length - 1}</span>` : ''}${
-          p.cnc !== false && p.qty > 1 && (p.sourceNames || []).length === p.qty ? ' <button class="link mini" data-split title="Split into one row per part, to change one of them">split</button>' : ''}</td>
+          p.qty > 1 && (p.sourceNames || []).length === p.qty ? ' <button class="link mini" data-split title="Split into one row per part, to change one of them">split</button>' : ''}</td>
         <td>${esc(p.cabinet)}</td>
         <td><input class="qty" type="number" min="0" step="1" data-k="qty" value="${effQty(p)}">${pendingOf(p) ? ` <span class="badge pend" title="Copied or deleted on the sheets: Nest &amp; toolpath nests the new count">${pendingOf(p) > 0 ? '+' : ''}${pendingOf(p)} on sheet</span>` : ''}${runQty !== p.qty ? ` <span class="muted small" title="Copies in the cabinets ticked above">→ ${runQty}</span>` : ''}</td>
         <td class="num">${f3(p.width)}</td><td class="num">${f3(p.height)}</td><td class="num">${f3(p.thickness)}</td>
@@ -356,7 +357,7 @@ const clOpts = () => ({ waste: 15, ...(job.settings.cutList || {}), kerf: 0.125 
 const kindOf = (mat, mrows) => job.cutListKinds?.[mat] || guessKind(mat, mrows);
 function cutStock(rows) {
   const o = clOpts(), sh = job.settings.sheet || {};
-  const key = JSON.stringify([rows.map((r) => [r.material, r.qty, r.length, r.width, r.thickness, r.grain, r.part]), job.cutListKinds || {}, o, sh.sheetW, sh.sheetH]);
+  const key = JSON.stringify([rows.map((r) => [r.material, r.qty, r.length, r.width, r.thickness, r.grainSet, r.part]), job.cutListKinds || {}, o, sh.sheetW, sh.sheetH]);
   if (stockCache.key === key) return stockCache.map;
   const map = new Map();
   for (const mat of [...new Set(rows.map((r) => r.material))]) {
@@ -365,8 +366,8 @@ function cutStock(rows) {
     if (kind === 'lumber') { map.set(mat, { kind, sizes: linealStock(mrows, o.waste) }); continue; }
     const W = sh.sheetW || 96, H = sh.sheetH || 48;
     let nest = null;
-    // parts may turn either way on the sheet (length along or across it)
-    try { nest = nestParts(sheetStockParts(mrows).map((p) => ({ ...p, grain: 'none' })), { sheetW: W, sheetH: H, trim: 0, endTrim: 0, spacing: o.kerf || 0, respectGrain: false, searchMs: 120 }); }
+    // parts turn either way on the sheet unless a grain was picked for them
+    try { nest = nestParts(sheetStockParts(mrows).map((p, i) => ({ ...p, grain: ['length', 'width'].includes(mrows[i].grainSet) ? mrows[i].grainSet : 'none' })), { sheetW: W, sheetH: H, trim: 0, endTrim: 0, spacing: o.kerf || 0, respectGrain: true, searchMs: 120 }); }
     catch (err) { console.warn('cut list sheet layout failed', err); }
     map.set(mat, { kind, W, H, sheets: nest?.sheets || [], unplaced: nest?.unplaced || [] });
   }

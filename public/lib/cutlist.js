@@ -30,6 +30,7 @@ export function cutListRows(parts) {
     width: p.height,
     thickness: p.thickness,
     grain: p.grain,
+    grainSet: p.grainOverride || '',   // picked in the parts list ('' = turns either way on the sheet maps)
   }));
   return rows.sort((a, b) => a.material.localeCompare(b.material) || a.part.localeCompare(b.part) || b.length - a.length || b.width - a.width);
 }
