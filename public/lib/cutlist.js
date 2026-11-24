@@ -92,20 +92,20 @@ export function sheetStockParts(rows) {
 export const placedSize = (pl) => (pl.rotated ? { w: pl.part.height, h: pl.part.width } : { w: pl.part.width, h: pl.part.height });
 
 // one sheet of the nest as an SVG map: parts outlined and labelled with their size
-export function sheetMapSvg(sheet, { width = 700 } = {}) {
+export function sheetMapSvg(sheet, { width = 700, label = 12 } = {}) {
   const W = sheet.w, H = sheet.h, sc = width / W, h = H * sc;
   const y = (v) => h - v * sc;   // sheet origin bottom-left
-  let g = `<rect x="0.5" y="0.5" width="${width - 1}" height="${h - 1}" fill="#fafafa" stroke="#111" stroke-width="1"/>`;
+  let g = `<rect x="0.5" y="0.5" width="${width - 1}" height="${h - 1}" fill="#fff" stroke="#000" stroke-width="1"/>`;
   for (const pl of sheet.placements) {
     const { w: pw, h: ph } = placedSize(pl);
     const x0 = pl.x * sc, x1 = (pl.x + pw) * sc, y0 = y(pl.y + ph), y1 = y(pl.y);
     const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
     const name = pl.part.name || '';
     const size = `${fraction(Math.max(pw, ph))} × ${fraction(Math.min(pw, ph))}`;
-    const fs = Math.max(7, Math.min(12, (y1 - y0) / 3, (x1 - x0) / Math.max(6, name.length * 0.62)));
-    g += `<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${(x1 - x0).toFixed(1)}" height="${(y1 - y0).toFixed(1)}" fill="#e9e4d6" stroke="#333" stroke-width="0.8"/>`;
+    const fs = Math.max(8, Math.min(label, (y1 - y0) / 3, (x1 - x0) / Math.max(6, name.length * 0.62)));
+    g += `<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${(x1 - x0).toFixed(1)}" height="${(y1 - y0).toFixed(1)}" fill="#e6e6e6" stroke="#000" stroke-width="0.8"/>`;
     g += `<text x="${cx.toFixed(1)}" y="${(cy - (y1 - y0 > 2.6 * fs ? fs * 0.15 : -fs * 0.35)).toFixed(1)}" font-size="${fs.toFixed(1)}" text-anchor="middle" font-family="system-ui,sans-serif">${name.replace(/[&<>]/g, '')}</text>`;
-    if (y1 - y0 > 2.6 * fs) g += `<text x="${cx.toFixed(1)}" y="${(cy + fs * 1.05).toFixed(1)}" font-size="${(fs * 0.85).toFixed(1)}" text-anchor="middle" fill="#555" font-family="system-ui,sans-serif">${size}</text>`;
+    if (y1 - y0 > 2.6 * fs) g += `<text x="${cx.toFixed(1)}" y="${(cy + fs * 1.05).toFixed(1)}" font-size="${(fs * 0.85).toFixed(1)}" text-anchor="middle" fill="#444" font-family="system-ui,sans-serif">${size}</text>`;
   }
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${h.toFixed(0)}" viewBox="0 0 ${width} ${h.toFixed(1)}">${g}</svg>`;
 }

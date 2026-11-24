@@ -365,7 +365,8 @@ function cutStock(rows) {
     if (kind === 'lumber') { map.set(mat, { kind, sizes: linealStock(mrows, o.waste) }); continue; }
     const W = sh.sheetW || 96, H = sh.sheetH || 48;
     let nest = null;
-    try { nest = nestParts(sheetStockParts(mrows), { sheetW: W, sheetH: H, trim: 0, endTrim: 0, spacing: o.kerf || 0, respectGrain: true, searchMs: 120 }); }
+    // parts may turn either way on the sheet (length along or across it)
+    try { nest = nestParts(sheetStockParts(mrows).map((p) => ({ ...p, grain: 'none' })), { sheetW: W, sheetH: H, trim: 0, endTrim: 0, spacing: o.kerf || 0, respectGrain: false, searchMs: 120 }); }
     catch (err) { console.warn('cut list sheet layout failed', err); }
     map.set(mat, { kind, W, H, sheets: nest?.sheets || [], unplaced: nest?.unplaced || [] });
   }
@@ -398,7 +399,7 @@ function stockSummaryHtml(rows, interactive = false) {
   }
   const w = clOpts().waste;
   const section = (title, body) => (body ? `<tr class="group"><td colspan="4">${title}</td></tr>${body}` : '');
-  return `<table class="cut-list stock-list"><tbody>${section(`Lumber${w ? ` <span class="muted small">(${w}% waste included)</span>` : ''}`, lum)}${section('Sheet goods <span class="muted small">(map of each sheet on the printed cut list)</span>', sht)}</tbody></table>`;
+  return `<table class="cut-list stock-list"><tbody>${section(`Lumber${w ? ` <span class="muted small">(${w}% waste included)</span>` : ''}`, lum)}${section('Sheet goods <span class="muted small">(parts may turn either way; map of each sheet on the printed cut list)</span>', sht)}</tbody></table>`;
 }
 
 function cutListHtml(rows, sortable = false) {
@@ -408,8 +409,9 @@ function cutListHtml(rows, sortable = false) {
   // the sort's order number shows next to its arrow when there's more than one
   const head = CUT_COLS.map(([key, label, num]) => {
     const i = cutSort.findIndex((c) => c.key === key);
-    const mark = i < 0 ? '' : ` ${cutSort[i].dir === 'desc' ? '▼' : '▲'}${cutSort.length > 1 ? `<sup>${i + 1}</sup>` : ''}`;
-    const cls = [num ? 'num' : '', sortable ? 'sortable' : '', i >= 0 ? 'sorted' : ''].filter(Boolean).join(' ');
+    // arrows only on screen: the printed list is in the same order, without them
+    const mark = i < 0 || !sortable ? '' : ` ${cutSort[i].dir === 'desc' ? '▼' : '▲'}${cutSort.length > 1 ? `<sup>${i + 1}</sup>` : ''}`;
+    const cls = [num ? 'num' : '', sortable ? 'sortable' : '', i >= 0 && sortable ? 'sorted' : ''].filter(Boolean).join(' ');
     const tip = i >= 0 ? 'click to reverse' : cutSort.length ? `sort by ${label.toLowerCase()} within the sort so far` : `sort by ${label.toLowerCase()}`;
     return `<th${cls ? ` class="${cls}"` : ''}${sortable ? ` data-sort="${key}" title="${tip}"` : ''}>${label}${mark}</th>`;
   }).join('');
@@ -429,15 +431,25 @@ function cutListHtml(rows, sortable = false) {
   return `<table class="cut-list"><tbody>${html}</tbody></table>`;
 }
 // printed cut list: a page with a map of every sheet of sheet goods (where each part comes out)
+// as many maps to a portrait page as fit at full width (two for 96 × 48 sheets,
+// more for smaller ones): page 10" of usable height, each map 7.5" wide plus its heading
 function cutListMaps(rows) {
-  let out = '';
+  const PAGE_H = 9.8, MAP_W = 7.5, HEAD = 0.55;
+  const blocks = [];
   for (const [mat, st] of cutStock(sortCutRows(rows))) {
     if (st.kind !== 'sheet') continue;
     st.sheets.forEach((sh2, i) => {
-      out += `<section class="page sheet-map"><h2>${esc(mat)} — sheet ${i + 1} of ${st.sheets.length}</h2><p class="small">${fraction(st.W)} × ${fraction(st.H)}, grain along the ${fraction(st.W)}" side · ${sh2.placements.length} parts</p>${sheetMapSvg(sh2)}</section>`;
+      const h = MAP_W * (sh2.h / sh2.w);
+      const svg = sheetMapSvg(sh2, { width: 720, label: 15 });
+      blocks.push({ h: h + HEAD, html: `<div class="sheet-map"><h2>${esc(mat)} — sheet ${i + 1} of ${st.sheets.length}</h2><p class="small">${fraction(st.W)} × ${fraction(st.H)} · ${sh2.placements.length} parts</p>${svg}</div>` });
     });
   }
-  return out;
+  const pages = [];
+  for (const b of blocks) {
+    const pg = pages[pages.length - 1];
+    if (pg && pg.used + b.h <= PAGE_H) { pg.items.push(b); pg.used += b.h; } else pages.push({ items: [b], used: b.h });
+  }
+  return pages.map((pg) => `<section class="page">${pg.items.map((b) => b.html).join('')}</section>`).join('');
 }
 
 function renderCutList() {
@@ -2328,8 +2340,8 @@ $('#cutListPrint').onclick = () => {
     table.cut-list th+th,table.cut-list td+td{border-left:1px solid #ccc}table.cut-list{border:1px solid #ccc}
     tr.col-head th{background:#f6f6f6}sup{font-size:8px}
     tr.group td{background:#eee;font-weight:600}.muted{color:#777}.small{font-size:11px}
-    tr.stock td{background:#fbf8ef;font-size:12px}.stock-k{font-weight:600;margin-right:6px}.warn-text{color:#b00}
-    .sheet-map{page-break-before:always;break-before:page}.sheet-map h2{font-size:15px;margin:0 0 8px}.sheet-map svg{width:100%;height:auto}</style></head><body>
+    tr.stock td{background:#f4f4f4;font-size:12px}.stock-k{font-weight:600;margin-right:6px}.warn-text{color:#000;font-weight:700}
+    .page{page-break-after:always;break-after:page}.page:last-child{page-break-after:auto;break-after:auto}.sheet-map{break-inside:avoid;page-break-inside:avoid;margin:0 0 12px}.sheet-map h2{font-size:14px;margin:0}.sheet-map p.small{margin:0 0 4px}.sheet-map svg{display:block;width:100%;height:auto}</style></head><body>
     <section class="page"><h1>Cut list — ${esc(job.name || '')}</h1><p>${new Date().toLocaleDateString()} · parts not cut on the CNC</p>
     <h2 style="font-size:15px;margin:0 0 6px">Stock needed</h2>${stockSummaryHtml(cutListRows(runParts().filter((p) => p.qty > 0)))}
     <h2 style="font-size:15px;margin:16px 0 6px">Parts</h2>${cutListHtml(cutListRows(runParts().filter((p) => p.qty > 0)))}</section>${cutListMaps(cutListRows(runParts().filter((p) => p.qty > 0)))}</body></html>`, { title: 'Cut list', orient: 'portrait', margin: 0.5, kind: 'cutlist' });

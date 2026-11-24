@@ -223,7 +223,7 @@ Parts tagged `cnc: false` (face frame stiles and rails from Cabinet build, or an
 
 **Stock needed** sits at the top of the cut list (on screen and printed), above the parts:
 - **Lumber** first: each material's lineal feet per size (width × thickness), rounded up to the next whole foot, with the **Lumber waste** factor already added (default 15%, set next to the heading, remembered on this PC).
-- **Sheet goods** next: how many sheets (the Sheet card's size, grain along its length) and how much of them the parts use. The printed cut list ends with a page per sheet: a map of where each part comes out, labelled with its size. A part bigger than a sheet is named.
+- **Sheet goods** next: how many sheets (the Sheet card's size; parts may turn either way on the sheet, length along or across it) and how much of them the parts use. The printed cut list ends with a map of each sheet — where each part comes out, labelled with its size — as many to a page as fit at full width (two 96 × 48 sheets a page, more for smaller sheets). A part bigger than a sheet is named. The printed list has the on-screen sort order without the sort arrows.
 - Each material's **Lumber / Sheet goods** switch is on its line (kept with the job). Until it's set, ply, BB/Baltic, MDF, melamine, particleboard and the like are sheet goods, and so is anything with a part wider than 12"; the rest is lumber.
 - The parts list below follows the same order: lumber materials, then sheet goods.
 
