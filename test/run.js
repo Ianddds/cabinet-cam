@@ -2058,6 +2058,26 @@ function distSeg(p, a, b) {
   check(!lone.length, `tabs: a tab beside every screw (${lone.length ? lone.map((q) => `${q.x},${q.y}`).join(' ') : '5 of 5'})`);
 }
 
+// a tab into waste an inch off a line two parts share slides onto it, so it holds
+// both (Carmel sheet 3: a side over a long bottom, the bottom starting partway along)
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  s0.holdDown = 'tabs'; s0.screws = { ...s0.screws, on: true };
+  s0.tabs = { ...s0.tabs, on: true, length: 1, thickness: 0.125, ramp: 0.125, spacing: 16, min: 6, smallBelow: 300, maxPer: 10, maxArea: 0 };
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const bit = { ...tl.tool, dia: 0.1969 };
+  const rect = (w, h) => [[0, 0], [w, 0], [w, h], [0, h]];
+  const P = (name, w, h) => ({ id: name, name, include: true, qty: 1, grain: 'length', thickness: 0.73, width: w, height: h, outline: rect(w, h), holes: [], pockets: [], material: 'M' });
+  const sheet = { w: 96, h: 48, trim: 0.12, trimX: 0.12, offcuts: [], placements: [
+    { part: P('SIDE', 30.5, 23.25), x: 4.95, y: 23.897, rotated: false, w: 30.5, h: 23.25, label: 'SIDE' },
+    { part: P('BOTTOM', 75.415, 22.5), x: 19.44, y: 1.2, rotated: false, w: 75.415, h: 22.5, label: 'BOTTOM' },
+    { part: P('SIDE-2', 59.25, 23.25), x: 35.647, y: 24.6, rotated: false, w: 59.25, h: 23.25, label: 'SIDE-2' },
+  ], screws: [{ x: 4.95, y: 47.8 }, { x: 50.05, y: 24.15 }, { x: 95.6, y: 47.8 }, { x: 20.1, y: 0.6 }, { x: 95.1, y: 0.6 }] };
+  const tabs = sheetTabs(sheet, { ...s0, ...tl, tool: bit, thickness: 0.73 }).tabs;
+  const onLine = (x) => tabs.some((t) => Math.abs(t.y - 23.8) < 0.01 && t.x > 19.44 && t.x < 35.45 && Math.abs(t.x - x) <= 2);
+  check(onLine(19.44) && onLine(35.45), `tabs: a shared tab near each end of the line two parts share, not an inch off it (${tabs.filter((t) => Math.abs(t.y - 23.8) < 0.01).map((t) => t.x.toFixed(2)).join(', ')})`);
+}
+
 // min stepdown (compression bits): a routed first pass shallower than it is
 // warned about, the file is still made; drilling is never checked
 {

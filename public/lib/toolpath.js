@@ -1372,6 +1372,8 @@ const SCREW_HOLD = 6;
 const CORNER_REACH = 3;
 // a part edge passing this close to a screw gets a tab at the point nearest it
 const SCREW_TAB_REACH = 3;
+// a tab into waste this close to a line it could share with a neighbour moves onto it (holds both parts)
+const SLIDE_TO_BRIDGE = 2.5;
 // Smaller parts get more tabs: Min per part at the Small parts size or bigger,
 // one more each time the area halves below it, never more than Max per part.
 // (Little weight or friction holds a small part; the bit pushes it just as hard.)
@@ -1391,6 +1393,9 @@ export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
   const lift = opt.length + tool.dia;
   const ramp = opt.ramp || 0;
   const need = lift + 2 * ramp + tool.dia + 0.1;   // edge length one tab takes, clear of corners
+  // spacing between tabs is along the path: two tabs either side of a corner are
+  // the two legs apart, not the straight line across (|dx| + |dy| on square parts)
+  const pathGap = (A, B) => Math.abs(A[0] - B[0]) + Math.abs(A[1] - B[1]);
   const W = sheet.w ?? Infinity, H = sheet.h ?? Infinity;
   const info = items.map((x) => {
     const loop = x.loops[x.loops.length - 1];
@@ -1495,7 +1500,7 @@ export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
     if (!fit) return false;
     const ex = force === 'min' ? Infinity : force ? 2 : 0;
     if (!hasRoom(me, rn, ex) || !hasRoom(other, fit.q, ex)) return false;
-    if (me.spans.some((sp2) => dist([(sp2[0][0] + sp2[1][0]) / 2, (sp2[0][1] + sp2[1][1]) / 2], P) < need)) return false;
+    if (me.spans.some((sp2) => pathGap([(sp2[0][0] + sp2[1][0]) / 2, (sp2[0][1] + sp2[1][1]) / 2], P) < need)) return false;
     useOne(me, rn); useOne(other, fit.q);
     me.spans.push(spanOn(rn, c)); other.spans.push(spanOn(fit.q, fit.tb));
     me.shared++; other.shared++;
@@ -1506,7 +1511,7 @@ export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
   const mid = (sp2) => [(sp2[0][0] + sp2[1][0]) / 2, (sp2[0][1] + sp2[1][1]) / 2];
   // a tab's centre may go anywhere on a run from need/2 in from either end
   const slotRange = (rn) => [rn.t0 + need / 2, rn.t1 - need / 2];
-  const clash = (me, P) => me.spans.some((sp2) => dist(mid(sp2), P) < need);
+  const clash = (me, P) => me.spans.some((sp2) => pathGap(mid(sp2), P) < need);
   // Tabs go in after the screws, in three steps (each adds a tab to held waste,
   // or a shared bridge that holds both parts):
   //  1. next to each screw: the waste is held hardest right there
@@ -1518,7 +1523,7 @@ export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
   const place = (me, rn, t) => {
     const P = at(rn, t);
     if (clash(me, P)) return false;
-    if (rn.cls === 'free') { me.spans.push(spanOn(rn, t)); useOne(me, rn); me.anch++; return true; }
+    if (rn.cls === 'free') { const sp2 = spanOn(rn, t); sp2.free = rn; sp2.at = t; me.spans.push(sp2); useOne(me, rn); me.anch++; return true; }
     const other = info.find((o) => o.x.pi === rn.cls);
     if (!other || !holdsBoth(other, P)) return false;
     return bridge(me, rn, t, 'min', other);
@@ -1543,7 +1548,7 @@ export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
         const d = dist(at(rn, t), S);
         if (d <= SCREW_TAB_REACH + r && (!best || d < best.d)) best = { rn, t, d };
       }
-      if (best && !me.spans.some((sp2) => dist(mid(sp2), S) <= SCREW_TAB_REACH + r)) place(me, best.rn, best.t);
+      if (best && !me.spans.some((sp2) => dist(mid(sp2), S) <= SCREW_TAB_REACH + r) && place(me, best.rn, best.t) && best.rn.cls === 'free') me.spans[me.spans.length - 1].screw = true;
     }
   }
   // 2. corners: each convex corner of the cut path with a straight run beside it
@@ -1624,6 +1629,30 @@ export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
       for (const t of [c0, (c0 + c1) / 2, c1]) { const P = at(rn, t); if (!clash(me, P) && (!best || screwDist(P) < best.sd)) best = { rn, t, sd: screwDist(P) }; }
     }
     if (best) place(me, best.rn, best.t);
+  }
+  // 4. a tab into waste with a shared line close by slides onto it (up to
+  // SLIDE_TO_BRIDGE): there it holds both parts. Not a tab beside a screw, and a
+  // part keeps at least one tab into held waste.
+  for (const me of info) {
+    if (!me.runs) continue;
+    for (const sp2 of me.spans.slice()) {
+      if (!sp2.free || sp2.screw || me.anch < 2) continue;
+      const P = mid(sp2);
+      let best = null;
+      for (const rn of me.runs) {
+        if (typeof rn.cls !== 'number') continue;
+        const t = nearestSlot(rn, P);
+        if (t == null) continue;
+        const Q = at(rn, t), d = dist(P, Q);
+        if (d > SLIDE_TO_BRIDGE || (best && d >= best.d)) continue;
+        const other = info.find((o) => o.x.pi === rn.cls);
+        if (!other || me.spans.some((o) => o !== sp2 && pathGap(mid(o), Q) < need) || clash(other, Q)) continue;
+        best = { rn, t, d, other };
+      }
+      if (!best) continue;
+      me.spans.splice(me.spans.indexOf(sp2), 1); me.anch--;
+      if (!bridge(me, best.rn, best.t, 'min', best.other)) { me.spans.push(sp2); me.anch++; }
+    }
   }
   for (const me of info) {
     if (!me.runs) continue;

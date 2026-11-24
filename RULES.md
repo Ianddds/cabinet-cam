@@ -90,7 +90,8 @@ toolpath / nesting code. Every rule here is a mistake that already happened once
    or it bridges to a part that is held — every part needs that chain, or the
    sheet warns. Tabs go in after the screws: one beside each screw (thin waste
    within 6" of a screw counts as held), one within 3" of every outside corner,
-   then the rest into the biggest gaps (no bunching on one edge). `npm test`
+   then the rest into the biggest gaps (no bunching on one edge); a tab into
+   waste within 2.5" of a line it could share slides onto it. `npm test`
    checks the chain (with a planted island part), the corners and the screws.
 8. **Optimize toolpaths for time whenever possible** — machine time from the
    machine profile (speeds, acceleration, bit changes), not inches of travel.
