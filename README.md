@@ -54,6 +54,7 @@ Click **load the sample job** (in the empty parts list, or **Help → Load the s
 3. Set sheet, tool, cutting and machine settings (remembered in the browser).
 4. **Nest** → searches for the best nest per material + thickness (a few seconds) and shows the layouts, with no toolpaths yet. Arrange the sheets if you need to (move, copy, delete, screws), then **Toolpath** → plans every sheet. Review, then download.
 5. **Save** stores the job (parts + settings) in `data/jobs/`.
+6. **Taking a job to another computer:** **Open job… → Export this job to a file…** (desktop app: **File → Export job…**, Ctrl+E) saves one `.cabcam` file: parts, settings, the tools the job used, the nests with every hand move, screw and tab, and the cut list choices — no keys or anything private. On the other computer, **Open job… → Import a job file…** (**File → Import job…**, Ctrl+I) adds it to that computer's jobs (as a copy named "(imported)" if it's already there) and opens it; click **Nest** to lay it out as saved, then **Toolpath**. Remnants stay on each computer's own rack: a material nested on remnants the other computer doesn't have is re-nested. Use the same app version on both for the same toolpaths.
 
 ## How parts are read from Onshape
 

@@ -107,7 +107,43 @@ async function refreshJobs() {
   const sel = $('#openJob');
   const jobs = await api('/api/jobs').catch(() => []);
   sel.innerHTML = '<option value="">Open job…</option>' +
-    jobs.map((j) => `<option value="${esc(j.id)}">${esc(j.name || j.id)} · ${j.parts} lines</option>`).join('');
+    jobs.map((j) => `<option value="${esc(j.id)}">${esc(j.name || j.id)} · ${j.parts} lines</option>`).join('') +
+    '<option disabled>──────────</option><option value="__export">Export this job to a file…</option><option value="__import">Import a job file…</option>';
+  if (job.id) sel.value = job.id;
+}
+
+// ---------- job files (.cabcam) ----------
+// One job in one file, to take to another computer: parts, settings, the tools
+// it used, the nests with every hand move, screw and tab, the cut list choices.
+// No keys or anything else private. Import adds it to this computer's jobs
+// (as a copy if a job with the same id is already here) and opens it.
+function exportJob() {
+  if (!job.parts?.length) { showMessages([{ error: true, text: 'Nothing to export yet: Get parts or open a job first.' }]); return; }
+  job.toolSnapshot = resolveTools(job.settings, library, job.toolSnapshot || []).snapshot;
+  const file = { format: 'cabinet-cam-job', version: 1, exported: new Date().toISOString(), job };
+  download(`${jobStamp()}.cabcam`, JSON.stringify(file, null, 1));
+  showMessages([{ text: `Exported ${job.name || 'the job'} — save it after the latest changes, or the file has the job as it is now on screen. On the other computer: Open job… → Import a job file….` }]);
+}
+function importJob() {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.cabcam,.json';
+  inp.onchange = async () => {
+    const f = inp.files?.[0];
+    if (!f) return;
+    try {
+      const data = JSON.parse(await f.text());
+      const j = data?.format === 'cabinet-cam-job' ? data.job : data;
+      if (!j || !Array.isArray(j.parts)) throw new Error(`${f.name} isn't a Cabinet CAM job file`);
+      const have = await api('/api/jobs').catch(() => []);
+      if (j.id && have.some((x) => x.id === j.id)) { delete j.id; j.name = `${j.name || 'Job'} (imported)`; }
+      const r = await api('/api/jobs', { method: 'POST', body: JSON.stringify(j) });
+      await refreshJobs();
+      await loadJob(r.id);
+      showMessages([{ text: `Imported ${j.name || f.name}. Click Nest to lay it out as saved, then Toolpath.` }]);
+    } catch (err) { showMessages([{ error: true, text: `Import failed: ${err.message}` }]); }
+  };
+  inp.click();
 }
 
 // ---------- messages ----------
@@ -2309,6 +2345,8 @@ window.cabinetCam = {
   loadSample: () => loadSample(),
   saveRaw: () => (lastRaw ? $('#saveRaw').click() : showMessages([{ text: 'No Onshape data yet: Get parts first.' }])),
   openSettings: () => showSettings(true),
+  exportJob: () => exportJob(),
+  importJob: () => importJob(),
 };
 $('#nestBtn').onclick = async () => { activeSheet = 0; await searchNests(false); $('#resultsCard').scrollIntoView({ behavior: 'smooth' }); };
 $('#searchAgain').onclick = () => searchNests(true);
@@ -2325,9 +2363,14 @@ $('#saveJob').onclick = (e) => busy(e.target, async () => {
 });
 
 $('#openJob').onchange = async (e) => {
-  if (!e.target.value) return;
+  const v = e.target.value;
+  if (v === '__export' || v === '__import') { e.target.value = job.id || ''; return v === '__export' ? exportJob() : importJob(); }
+  if (!v) return;
+  await loadJob(v);
+};
+async function loadJob(id) {
   try {
-    const j = await api(`/api/jobs/${encodeURIComponent(e.target.value)}`);
+    const j = await api(`/api/jobs/${encodeURIComponent(id)}`);
     job = { ...j, settings: mergeSettings(j.settings) };
     delete job.grainRules;   // per-type grain rules are gone: a part's own choice, then the model
     $('#jobName').value = job.name || '';
@@ -2337,8 +2380,9 @@ $('#openJob').onchange = async (e) => {
     showMessages([]);
     renderSettings();
     renderParts();
+    $('#openJob').value = job.id || '';
   } catch (err) { showMessages([{ error: true, text: err.message }]); }
-};
+}
 
 // ---------- post files (.pp) ----------
 // Vectric-format posts in this computer's posts folder; the job's post is

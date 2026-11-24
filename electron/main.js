@@ -113,6 +113,11 @@ async function checkForUpdates(manual) {
 function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: 'File', submenu: [
+      // job files to take to another computer (the page does the work; true = a user
+      // gesture, so it may open the file picker)
+      { label: 'Export job…', accelerator: 'CmdOrCtrl+E', click: () => win?.webContents.executeJavaScript('window.cabinetCam && window.cabinetCam.exportJob()', true) },
+      { label: 'Import job…', accelerator: 'CmdOrCtrl+I', click: () => win?.webContents.executeJavaScript('window.cabinetCam && window.cabinetCam.importJob()', true) },
+      { type: 'separator' },
       { label: 'Open data folder', click: () => shell.openPath(dataDir()) },
       { label: 'Import from an old copy…', click: importOldInstall },
       { type: 'separator' },
