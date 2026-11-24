@@ -12,8 +12,12 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
 let baseUrl = null;
 
-if (!app.requestSingleInstanceLock()) app.quit();
-app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
+// One copy at a time: a second launch just brings the open window forward.
+// app.exit, not app.quit: quit waits, and the second copy would still get
+// "ready", start its own server and open a window before it closed.
+const firstCopy = app.requestSingleInstanceLock();
+if (!firstCopy) app.exit(0);
+app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
 
 const dataDir = () => path.join(app.getPath('userData'), 'data');
 
@@ -141,6 +145,7 @@ function buildMenu() {
 }
 
 app.whenReady().then(async () => {
+  if (!firstCopy) return;
   try {
     const { port } = await startBackend();
     baseUrl = `http://127.0.0.1:${port}`;
