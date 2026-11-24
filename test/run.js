@@ -15,7 +15,7 @@ import { SHAPE_ORDERS, placeShapes, isShapePart } from '../public/lib/shapes.js'
 import { normalizeAll } from '../lib/parts.js';
 import { decode } from '../lib/onshape.js';
 import { nestParts, placedGeometry, applySolution, nestKey } from '../public/lib/nest.js';
-import { sheetTabs, sheetToolpaths, fillHoleBites, placeTabs, legsOf, splitLobes, legsFromWalls, offcutCutLines, screwR, screwCheck } from '../public/lib/toolpath.js';
+import { sheetTabs, minTabsFor, sheetToolpaths, fillHoleBites, placeTabs, legsOf, splitLobes, legsFromWalls, offcutCutLines, screwR, screwCheck } from '../public/lib/toolpath.js';
 import { postGcode, postShopBot, post as postAny, fitArcs } from '../public/lib/post.js';
 import { parsePP } from '../public/lib/vpp.js';
 import { carve, check as simCheck } from '../public/lib/sim.js';
@@ -2009,6 +2009,23 @@ function distSeg(p, a, b) {
     return xs.some((x) => x <= 3.6 + 0.5) && xs.some((x) => x >= 18 - 3.6 - 0.5);
   });
   check(endsOk, 'tabs: every drawer side in a stack is held near both ends');
+  // Min per part is a floor: thin drawer parts stacked a bit apart (edges under the
+  // Spacing, shared with neighbours) still get it
+  {
+    const cfg4 = { ...cfg, tabs: { ...cfg.tabs, length: 1, ramp: 0.125, spacing: 24, min: 4, smallBelow: 0, maxArea: 0 } };
+    const thin = Array.from({ length: 5 }, (_, i) => place(P(`Thin ${i + 1}`, 18, 2.062), 10, 10 + i * 2.562));
+    const r4 = sheetToolpaths({ w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], screws: corners, screwsManual: true, placements: thin }, cfg4);
+    const per = thin.map((pl) => r4.tabs.filter((q) => q.x >= pl.x - 0.3 && q.x <= pl.x + 18.3 && q.y >= pl.y - 0.3 && q.y <= pl.y + 2.362).length);
+    check(per.every((n) => n >= 4) && !r4.warnings.some((w) => /tabs — its edges/.test(w)), `tabs: Min per part 4 met on thin stacked drawer parts (${per.join(', ')})`);
+    // smaller parts get more: +1 each time the area halves below Small parts below, up to Max
+    const o = { min: 3, smallBelow: 300, maxPer: 7 };
+    check([802, 230, 119, 71, 37].map((a) => minTabsFor(o, a)).join() === '3,4,5,6,7' && minTabsFor({ ...o, smallBelow: 0 }, 37) === 3, 'tabs: minimum rises as parts get smaller (3,4,5,6,7), off at 0');
+    const cfg5 = { ...cfg, tabs: { ...cfg.tabs, length: 0.5, ramp: 0.125, spacing: 24, min: 3, smallBelow: 300, maxPer: 6, maxArea: 0 } };
+    const big = place(P('Big', 30, 20), 10, 10), small = place(P('Small', 12, 4), 50, 10);
+    const r5 = sheetToolpaths({ w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], screws: corners, screwsManual: true, placements: [big, small] }, cfg5);
+    const nb = r5.tabs.filter((q) => q.x < 45).length, ns = r5.tabs.filter((q) => q.x > 45).length;
+    check(ns >= 6 && ns > nb - 1, `tabs: a 12x4 part gets more tabs than its floor (${ns}), a 30x20 its spacing count (${nb})`);
+  }
   // a part in an island of waste with no screw (a ring of parts around it): no chain, so a warning
   const ring = [place(P('Ring top', 30, 4), 20, 30), place(P('Ring bottom', 30, 4), 20, 14.25), place(P('Ring left', 4, 11.5), 20, 18.5), place(P('Ring right', 4, 11.5), 46, 18.5), place(P('Inner', 8, 4), 31, 22)];
   const sheetB = { w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], screws: corners, screwsManual: true, placements: ring };

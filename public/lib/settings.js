@@ -33,7 +33,9 @@ export const DEFAULT_SETTINGS = {
   holdDown: 'skin',
   onionSkin: 0.02,
   // tabs left on part outlines; thickness = material left at the bottom, maxArea 0 = all parts
-  tabs: { on: false, length: 0.375, thickness: 0.125, ramp: 0.25, spacing: 18, min: 2, maxArea: 0 },  // ramp: length of the slope on and off each tab (0 = straight up and down)
+  tabs: { on: false, length: 0.375, thickness: 0.125, ramp: 0.25, spacing: 18, min: 2, smallBelow: 300, maxPer: 7, maxArea: 0 },
+  // ramp: length of the slope on and off each tab (0 = straight up and down);
+  // smallBelow / maxPer: smaller parts get more tabs (minTabsFor in toolpath.js)
   overcut: 0.01,
   stayDownMax: 3,
   dadosFirst: true,  // dados before holes always (one bit: costs a reload of it when a drill bit has holes)

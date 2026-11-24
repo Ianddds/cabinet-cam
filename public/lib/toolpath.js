@@ -1222,7 +1222,7 @@ export function placeTabs(loop, opt, tool) {
   }
   const usable = edges.filter((e) => e.cap > 0);
   if (!usable.length) return [];
-  const want = Math.max(opt.min || 1, Math.round(s / (opt.spacing || 18)));
+  const want = Math.max(minTabsFor(opt, Math.abs(signedArea(loop))), Math.round(s / (opt.spacing || 18)));
   const room = usable.reduce((a, e) => a + e.cap, 0);
   for (let n = Math.min(want, room); n > 0; n--) {
     let best = null;
@@ -1262,6 +1262,17 @@ export function placeTabs(loop, opt, tool) {
 // the end fifth of the part, at least one tab-width in), not just in the middle.
 // Sets x.tabs.spans = [[a, b], ...] (flat tops, tool-centre XY) on each item.
 const MIN_LIGAMENT = 0.25; // inch
+// Smaller parts get more tabs: Min per part at the Small parts size or bigger,
+// one more each time the area halves below it, never more than Max per part.
+// (Little weight or friction holds a small part; the bit pushes it just as hard.)
+// opt.smallBelow 0 = off (Min per part for every part).
+export function minTabsFor(opt, area) {
+  const base = Math.max(1, opt.min || 1);
+  const ref = opt.smallBelow ?? 300;
+  const top = Math.max(base, opt.maxPer ?? 7);
+  if (!(ref > 0) || !(area > 0) || area >= ref) return base;
+  return Math.min(top, base + Math.ceil(Math.log2(ref / area) - 1e-9));
+}
 export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
   const tabbed = items.filter((x) => x.tabs);
   if (!tabbed.length) return;
@@ -1368,7 +1379,7 @@ export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
       if (tb - lift / 2 - ramp >= q.t0 - 1e-6 && tb + lift / 2 + ramp <= q.t1 + 1e-6) { fit = { q, tb }; break; }
     }
     if (!fit) return false;
-    const ex = force ? 2 : 0;
+    const ex = force === 'min' ? Infinity : force ? 2 : 0;
     if (!hasRoom(me, rn, ex) || !hasRoom(other, fit.q, ex)) return false;
     if (me.spans.some((sp2) => dist([(sp2[0][0] + sp2[1][0]) / 2, (sp2[0][1] + sp2[1][1]) / 2], P) < need)) return false;
     useOne(me, rn); useOne(other, fit.q);
@@ -1433,7 +1444,7 @@ export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
   for (const me of info) {
     if (!me.runs) continue;
     const perim = me.loop.reduce((a, p, i) => a + dist(p, me.loop[(i + 1) % me.loop.length]), 0);
-    const want = Math.max(opt.min || 1, Math.round(perim / (opt.spacing || 18)));
+    const want = Math.max(minTabsFor(opt, me.x.area), Math.round(perim / (opt.spacing || 18)));
     const free = me.runs.filter((rn) => rn.cls === 'free');
     // the rest: spread along anchored edges, the edges nearest a screw first
     const fr = free.map((rn) => {
@@ -1458,7 +1469,32 @@ export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
       if (clash(me, at(f.rn, P))) continue;   // an end tab is already there
       me.spans.push(spanOn(f.rn, P)); me.anch++;
     }
+    // Min per part is a floor: when the edges' budgets, neighbours and the sheet
+    // edge leave a part short, add tabs where they're farthest from the ones it
+    // has — to anchored waste first, else a bridge to the next part
+    const minTabs = minTabsFor(opt, me.x.area);
+    for (let guard = 0; me.spans.length < minTabs && guard < 12; guard++) {
+      let best = null;
+      for (const rn of me.runs) {
+        if (rn.cls !== 'free' && typeof rn.cls !== 'number') continue;
+        const [c0, c1] = slotRange(rn);
+        if (c1 < c0) continue;
+        const n2 = Math.max(1, Math.ceil((c1 - c0) / 0.5));
+        for (let i = 0; i <= n2; i++) {
+          const t = c0 + ((c1 - c0) * i) / n2;
+          const P = at(rn, t);
+          if (clash(me, P)) continue;
+          const far = me.spans.length ? Math.min(...me.spans.map((sp2) => dist(mid(sp2), P))) : 1e3;
+          const score = far + (rn.cls === 'free' ? 3 : 0);
+          if (!best || score > best.score) best = { rn, t, score };
+        }
+      }
+      if (!best) break;
+      if (best.rn.cls === 'free') { me.spans.push(spanOn(best.rn, best.t)); useOne(me, best.rn); me.anch++; }
+      else if (!bridge(me, best.rn, best.t, 'min')) break;
+    }
     me.free = me.anch;
+    if (me.spans.length && me.spans.length < minTabs) warnings.push(`${me.x.label}: room for ${me.spans.length} of ${minTabs} tabs — its edges are too short or face the sheet edge`);
     if (!me.spans.length) warnings.push(`${me.x.label}: no straight run with material past it long enough for a tab`);
   }
   // every part needs a chain of tabs back to anchored waste (a screwed-down

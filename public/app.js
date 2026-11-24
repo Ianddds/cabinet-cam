@@ -2,7 +2,7 @@ import { DEFAULT_SETTINGS, groupParts, mergeSettings, holdDownOf, usesSkin, uses
 import { carve, check, shade } from './lib/sim.js';
 import { nestParts, applySolution, nestKey, placedGeometry, partExits, rectMinus, compareKeep } from './lib/nest.js';
 import { placeShapes, isShapePart, labelPoint, SHAPE_ORDERS } from './lib/shapes.js';
-import { sheetToolpaths, sheetTabs, screwR, rectsOutline, screwCheck, offcutCutLines, tabOnPaths } from './lib/toolpath.js';
+import { sheetToolpaths, sheetTabs, minTabsFor, screwR, rectsOutline, screwCheck, offcutCutLines, tabOnPaths } from './lib/toolpath.js';
 import { post, postWithWarnings, fileExtension, SBP_MAX_TOOL, toolNumberOk } from './lib/post.js';
 import { parsePP } from './lib/vpp.js';
 import { DEFAULT_LIBRARY, TOOL_FIELDS, newTool, resolveTools } from './lib/tools.js';
@@ -338,6 +338,7 @@ function cutListHtml(rows, sortable = false) {
 
 function renderCutList() {
   const rows = cutListRows(runParts().filter((p) => p.qty > 0));
+  // first card in the main column, above the parts; hidden when there's nothing on it
   $('#cutListCard').hidden = !rows.length;
   if (!rows.length) return;
   const pcs = rows.reduce((a, r) => a + r.qty, 0);
@@ -482,7 +483,16 @@ $('#holeTools').addEventListener('change', (e) => {
   markStale();
 });
 
+// what Min per part / Small parts below / Max per part give a few typical parts
+function tabMinPreview() {
+  const el = $('#tabMinPreview');
+  if (!el) return;
+  const t = job.settings.tabs || {};
+  el.textContent = 'Min tabs: ' + [[18, 2], [18, 6.5], [35, 6.5], [35, 23]].map(([w, h]) => `${w}×${h}: ${minTabsFor(t, w * h)}`).join(' · ');
+}
+
 function renderSettings() {
+  setTimeout(tabMinPreview);
   renderToolPickers();
   for (const el of document.querySelectorAll('[data-path]')) {
     const v = getPath(job.settings, el.dataset.path);
@@ -519,6 +529,7 @@ let showSettings = () => {};
 }
 
 const onSettingChange = (e) => {
+  setTimeout(tabMinPreview);
   const el = e.target;
   if (!el.dataset.path) return;
   let v = el.type === 'checkbox' ? el.checked : el.value;
