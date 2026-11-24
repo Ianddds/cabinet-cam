@@ -40,6 +40,8 @@ export const DEFAULT_SETTINGS = {
   stayDownMax: 3,
   // cut list stock: lumber waste factor (%), saw kerf between sheet-goods parts (in)
   cutList: { waste: 15, kerf: 0.125 },
+  pocketFinish: false,   // dado/rabbet walls: off = each leg whole, wall pass as its last row; on = rows finishAllow short, one skim per wall at the bottom depth
+  finishAllow: 0.015,
   dadosFirst: true,  // dados before holes always (one bit: costs a reload of it when a drill bit has holes)
   peckOver: 0.5,     // holes deeper than this (from where the hole starts) are pecked
   peckStep: 0.375,   // ... this deep a stroke (a bit's own Peck, if set, wins)

@@ -642,7 +642,7 @@ for (const g of groupParts(parts)) {
     const nOpts = cl ? { ...s.sheet, spacing: tl.tool.dia, commonLine: true, respectGrain: true } : { ...s.sheet, respectGrain: true };
     for (const sh of nestParts(g.parts, nOpts).sheets) {
       // (the shared-lines run also ramps into pockets at 45°, so ramps stay checked)
-      const tp = sheetToolpaths(sh, { ...s, ...tl, commonLine: cl, holdDown: cl ? 'tabs' : s.holdDown, pocketRampAngle: cl ? 45 : 0, thickness: g.thickness });
+      const tp = sheetToolpaths(sh, { ...s, ...tl, commonLine: cl, holdDown: cl ? 'tabs' : s.holdDown, pocketRampAngle: cl ? 45 : 0, pocketFinish: cl, thickness: g.thickness });   // shared lines: with the finish pass too
       const loads = tp.moves.filter((m) => m.toolchange).map((m) => m.tool);
       const oneBit = tl.tool === tl.dadoTool || (tl.tool.dia === tl.dadoTool.dia && tl.tool.name === tl.dadoTool.name);
       // dados before holes (dadosFirst): with one bit and a drill bit, the main
@@ -691,15 +691,15 @@ for (const g of groupParts(parts)) {
           const fa = area(open);
           const step = fa < 60 ? 0.03 : fa < 200 ? 0.05 : 0.1;
           const near = segAll.filter((sg) => sg.z <= -q.depth + 1e-6 && Math.max(sg.a[0], sg.b[0]) > bx0 - r && Math.min(sg.a[0], sg.b[0]) < bx1 + r && Math.max(sg.a[1], sg.b[1]) > by0 - r && Math.min(sg.a[1], sg.b[1]) < by1 + r);
-          let miss = 0, worst = 0;
+          let miss = 0, worst = 0, firstMiss = null;
           for (let x = bx0 + 0.01; x < bx1; x += step) for (let y = by0 + 0.01; y < by1; y += step) {
             if (!inRegion([x, y], open)) continue;
             let d = Infinity;
             for (const sg of near) { d = Math.min(d, segD([x, y], sg.a, sg.b)); if (d <= r + 1e-3) break; }
-            if (d > r + 1e-3) { miss++; worst = Math.max(worst, d - r); }
+            if (d > r + 1e-3) { miss++; worst = Math.max(worst, d - r); firstMiss ??= [x, y]; }
           }
           pocketsChecked++;
-          check(miss === 0, `${pl.label || pl.part.name} pocket floor fully cut (${miss} spots missed, up to ${worst.toFixed(3)}")`);
+          check(miss === 0, `${pl.label || pl.part.name} pocket floor fully cut (${miss} spots missed, up to ${worst.toFixed(3)}"${firstMiss ? `, first at ${firstMiss.map((v) => v.toFixed(2))} on the ${cl ? 'shared-line' : 'spaced'} sheet` : ''})`);
         }
       }
       // open-ended dados: every row that leaves the part runs at least half the
@@ -758,7 +758,8 @@ for (const g of groupParts(parts)) {
           prevM = m;
         }
         check(tooDeep === 0, `pocket moves never deeper than the floor under the bit (${tooDeep} spots)`);
-        check(badFin === 0, `walls finished last at each depth (${badFin} clearing moves after the finishing pass)`);
+        // (finish pass on: the wall skims come after every row of that depth; off, each leg's wall pass is its own last row)
+        if (cl) check(badFin === 0, `finish pass: walls finished last at each depth (${badFin} clearing moves after the finishing pass)`);
       }
       // each part: its dados / rabbets, then its cutouts, then its outline
       {
@@ -1592,8 +1593,18 @@ function opOrder(sheet, moves, reach) {
   }
   let rap = 0, prev = null;
   for (const m of tp.moves) { if (m.x == null) continue; if (prev && m.g === 0) rap += Math.hypot(m.x - prev.x, m.y - prev.y); prev = m; }
-  // in the order the neighbours happen to be listed this was 189" (SIDE-R > SIDE-L > STRETCHER-F > BOTTOM)
-  check(rap <= 160, `neighbours' dados before a shared line, least travel first (${rap.toFixed(0)}" of rapids, was 189")`);
+  // in the order the neighbours happen to be listed this was 189" (SIDE-R > SIDE-L > STRETCHER-F > BOTTOM).
+  // Chain order (each leg of a dado group whole, 2026-11-24) traded this per-part
+  // case (Dados before holes off) from 136" to 189" (+17 s) for the default one
+  // below (236" -> 178", -13 s): a pocket's start is chosen by its own time, and
+  // here the quicker start leaves the side's outline a worse place to begin.
+  check(rap <= 190, `neighbours' dados before a shared line, Dados before holes off (${rap.toFixed(0)}" of rapids, 136" before chain order)`);
+  {
+    const mvD = sheetToolpaths(sheet, { ...s0, ...tl, thickness: 0.75, holdDown: 'tabs' }).moves;
+    let rapD = 0, pv = null;
+    for (const m of mvD) { if (m.x == null) continue; if (pv && m.g === 0) rapD += Math.hypot(m.x - pv.x, m.y - pv.y); pv = m; }
+    check(rapD <= 180, `neighbours' dados, Dados before holes on (${rapD.toFixed(0)}" of rapids, 236" before chain order)`);
+  }
   check(opOrder(sheet, tp.moves, tl.tool.dia / 2 + 0.02).late === 0, 'and still every part\'s dados before its cutout');
 }
 
@@ -1988,15 +1999,63 @@ function distSeg(p, a, b) {
       { loops: [rect(58.52, 0, W, 22.75)], depth: d, walls: [{ cut: 'R', seg: [[58.52, 0], [58.52, 0.5]] }, { cut: 'R', seg: [[58.52, 0.998], [58.52, 22.75]] }] },
     ] };
   const sheet = { w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], placements: [{ part, x: 13.74, y: 23.63, rot: 0, w: W, h: H, label: 'U' }] };
-  const mv = sheetToolpaths(sheet, { ...s0, ...tl, tool: bit, dadoTool: null, dadoSameTool: true, thickness: 0.745 }).moves;
-  let on = false, rap = 0, prev = null, longest = 0;
-  for (const m of mv) {
-    if (m.comment) { on = / pocket /.test(m.comment); continue; }
-    if (!on || m.x == null) continue;
-    if (prev && m.g === 0) { const L = Math.hypot(m.x - prev.x, m.y - prev.y); rap += L; longest = Math.max(longest, L); }
-    prev = m;
+  const cfgU = { ...s0, ...tl, tool: bit, dadoTool: null, dadoSameTool: true, thickness: 0.745, holdDown: 'skin' };
+  const inPocket = (mv) => {
+    let on = false, rap = 0, prev = null, longest = 0;
+    const fin = [];
+    for (const m of mv) {
+      if (m.comment) { on = / pocket /.test(m.comment); continue; }
+      if (!on || m.x == null) continue;
+      if (prev && m.g === 0) { const L = Math.hypot(m.x - prev.x, m.y - prev.y); rap += L; longest = Math.max(longest, L); }
+      if (m.op === 'finish' && m.g === 1 && m.z < -1e-6) fin.push(m.z);
+      prev = m;
+    }
+    return { rap, longest, fin };
+  };
+  // chain order (default): each leg whole, one leg straight into the next
+  const mv = sheetToolpaths(sheet, cfgU).moves;
+  const u = inPocket(mv);
+  check(u.longest < 2 && u.rap < 10, `U of rabbets and a dado, chain order: ${u.rap.toFixed(1)}" of rapids in the pocket, longest ${u.longest.toFixed(1)}" (was 180", with 58" trips across)`);
+  const sim = simCheck(sheet, carve(sheet, mv, { res: 0.02, dia: bit.dia }), { dia: bit.dia, profileDia: bit.dia, thickness: 0.745, holdDown: 'skin' });
+  check(sim.ok, `U, chain order: cuts clean (${sim.uncut} uncut, ${sim.deep} deep, ${sim.notThrough} not through)`);
+  // finish pass: rows held 0.015 off the walls, wall passes only at the bottom depth
+  const mvF = sheetToolpaths(sheet, { ...cfgU, pocketFinish: true }).moves;
+  const f = inPocket(mvF);
+  check(f.fin.length > 0 && f.fin.every((z) => z <= -0.26 + 1e-6), `U, finish pass: wall passes only at the bottom depth (${f.fin.length} moves, shallowest ${f.fin.length ? Math.max(...f.fin).toFixed(3) : '-'})`);
+  const simF = simCheck(sheet, carve(sheet, mvF, { res: 0.02, dia: bit.dia }), { dia: bit.dia, profileDia: bit.dia, thickness: 0.745, holdDown: 'skin' });
+  check(simF.ok && f.longest < 30, `U, finish pass: cuts clean, no trip across (${simF.uncut} uncut, ${simF.deep} deep; longest rapid ${f.longest.toFixed(1)}")`);
+}
+
+// tabs go in after the screws: a tab beside each screw, one near every outside
+// corner (no end left to lift and chatter), the rest spread into the biggest gaps
+// (the Carmel closet sheet: two sides, two bottoms, a partition with teeth, 5 screws)
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  s0.holdDown = 'tabs'; s0.screws = { ...s0.screws, on: true };
+  s0.tabs = { ...s0.tabs, on: true, length: 1, thickness: 0.125, ramp: 0.125, spacing: 16, min: 6, smallBelow: 300, maxPer: 10, maxArea: 0 };
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const bit = { ...tl.tool, dia: 0.1969, name: '5 mm Straight' };
+  const rect = (w, h) => [[0, 0], [w, 0], [w, h], [0, h]];
+  const P = (name, w, h, outline = rect(w, h)) => ({ id: name, name, include: true, qty: 1, grain: 'length', thickness: 0.745, width: w, height: h, outline, holes: [], pockets: [], material: 'M' });
+  const teeth = [[0, 0.4], [7.5, 0.4], [7.5, 0], [9, 0], [9, 0.4], [14.5, 0.4], [14.5, 0], [16, 0], [16, 0.4], [21.5, 0.4], [21.5, 0], [23, 0], [23, 0.4], [28.54, 0.4], [28.54, 22.26], [0, 22.26]];
+  const placements = [
+    { part: P('BOTTOM', 37.602, 23.25), x: 0.7, y: 0.7, rotated: false, w: 37.602, h: 23.25, label: 'BOTTOM' },
+    { part: P('SIDE-L', 59.25, 23.25), x: 0.75, y: 24.147, rotated: false, w: 59.25, h: 23.25, label: 'SIDE-L' },
+    { part: P('SIDE-R', 12.5, 22.7), x: 38.499, y: 0.4, rotated: false, w: 12.5, h: 22.7, label: 'SIDE-R' },
+    { part: P('BOTTOM-2', 37.602, 22.9), x: 51.449, y: 0.4, rotated: false, w: 37.602, h: 22.9, label: 'BOTTOM-2' },
+    { part: P('PARTITION', 28.54, 22.26, teeth), x: 60.85, y: 24.3, rotated: false, w: 28.54, h: 22.26, label: 'PARTITION' },
+  ];
+  const screws = [{ x: 0.3, y: 47.7 }, { x: 89.6, y: 47.7 }, { x: 0.3, y: 0.3 }, { x: 89.6, y: 0.3 }, { x: 44.5, y: 23.8 }];
+  const sheet = { w: 96, h: 48, trim: 0.12, trimX: 0.12, offcuts: [], placements, screws };
+  const tabs = sheetTabs(sheet, { ...s0, ...tl, tool: bit, thickness: 0.745 }).tabs;
+  const far = [];
+  for (const pl of placements) for (const c of [[pl.x, pl.y], [pl.x + pl.w, pl.y], [pl.x + pl.w, pl.y + pl.h], [pl.x, pl.y + pl.h]]) {
+    const d = Math.min(...tabs.map((t) => Math.hypot(t.x - c[0], t.y - c[1])));
+    if (d > 3.1) far.push(`${pl.label} (${c.map((v) => v.toFixed(1))}) ${d.toFixed(1)}"`);
   }
-  check(longest < 30 && rap < 100, `U of rabbets and a dado: ${rap.toFixed(1)}" of rapids in the pocket, longest ${longest.toFixed(1)}" (was 180", with 58" trips across)`);
+  check(!far.length, `tabs: every outside corner has a tab within 3" (${far.length ? far.join(', ') : 'all 20'})`);
+  const lone = screws.filter((q) => Math.min(...tabs.map((t) => Math.hypot(t.x - q.x, t.y - q.y))) > 3.2);
+  check(!lone.length, `tabs: a tab beside every screw (${lone.length ? lone.map((q) => `${q.x},${q.y}`).join(' ') : '5 of 5'})`);
 }
 
 // min stepdown (compression bits): a routed first pass shallower than it is

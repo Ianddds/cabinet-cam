@@ -38,15 +38,26 @@ toolpath / nesting code. Every rule here is a mistake that already happened once
 1. **Least rapid travel.** Any change to toolpath order must not increase rapid
    travel. `npm test` checks total rapids against a baseline; if a change is meant
    to trade travel for something else, say so and update the baseline on purpose.
-2. **Pockets: clear the middle first, finish the walls last.** Touching pockets
-   are one operation; any depth order cuts the same shape (a depth not cut yet
-   counts as open), so the order is picked by time. Clearing rows run along each leg (never across),
-   farthest from the finished edges first — a rabbet from its open edge in to
-   its wall. Stubs (rows ≤ 3 bit widths, left where dados cross) are exempt and
-   are cut whenever the bit passes. Finishing passes follow finished edges only (walls, steps), through
-   the corner reliefs, and run half the bit past any open edge. No finish
-   allowance (chip clearance matters more). The cutter stays down inside a
-   pocket wherever it safely can.
+2. **Pockets: each leg whole, out to in.** Touching pockets are one operation;
+   any depth order cuts the same shape (a depth not cut yet counts as open), so
+   the order is picked by time. Square-sided groups (a straight dado, an L, a C
+   of rabbets and a dado) are cut leg by leg: each leg complete, its wall pass as
+   its last row, then straight on to the next leg. Rows run along each leg
+   (never across); a rabbet from its open edge in to its wall, a dado middle
+   first, so the first full-width pass is never on a wall. Each leg's start end
+   is picked so it finishes next to the next leg; a leg that joins two others
+   may hold back its last pass and cut it on the way back. A wall pass is split
+   where it crosses into the next leg; a corner square belongs to the leg that
+   runs straight through it (else the longer one). Stubs (rows ≤ 3 bit widths,
+   or ≤ 1" row ends a wall pass cut short) are cut whenever the bit passes. The
+   cutter stays down inside a pocket wherever it safely can: links up to 1" into
+   the next leg are fed at depth, a hop onto floor already cut drops straight to
+   just above it, and on a near tie the start that keeps it down wins.
+   *Finish pass* (off by default): rows stop *Finish allowance* (0.015") short of
+   every wall, and after the bottom depth one light pass runs along each wall
+   (through the corner reliefs, half the bit past open edges); costs time (about
+   50 s on a 60" closet side). Curved or odd-shaped pockets keep the spiral with
+   its wall lap.
 3. **Contours start at the nearest point on the edge**, not the nearest corner
    (tabbed parts excepted).
 4. **Dados before any outline when dados go first.** With *Dados before holes
@@ -77,8 +88,10 @@ toolpath / nesting code. Every rule here is a mistake that already happened once
 7b. **Tabs hold to something that holds.** A tab only counts if the waste it
    ties to is anchored (a screw in it; no screws: the biggest skeleton piece),
    or it bridges to a part that is held — every part needs that chain, or the
-   sheet warns. Long parts get a tab near each end (end fifth) before the even
-   spread. `npm test` checks both, with a planted island part.
+   sheet warns. Tabs go in after the screws: one beside each screw (thin waste
+   within 6" of a screw counts as held), one within 3" of every outside corner,
+   then the rest into the biggest gaps (no bunching on one edge). `npm test`
+   checks the chain (with a planted island part), the corners and the screws.
 8. **Optimize toolpaths for time whenever possible** — machine time from the
    machine profile (speeds, acceleration, bit changes), not inches of travel.
 9. **Every sample sheet must pass the cut simulation** (floors cut, nothing too

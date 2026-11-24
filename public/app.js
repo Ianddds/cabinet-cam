@@ -249,10 +249,11 @@ $('#cabFilter').addEventListener('click', (e) => {
 
 // ---------- parts table ----------
 // Grain cell: override select; "Auto" shows what the job rule / model gives.
-// Cut-list parts (not cut on the CNC) turn either way on the cut list's sheet
-// maps unless a grain is picked here.
+// Cut-list parts (not cut on the CNC) keep their grain on the cut list's sheet
+// maps like CNC parts (Auto: what the model says, usually along the length);
+// Any lets one turn either way.
 function grainCell(p) {
-  const auto = p.cnc === false ? 'any' : effectiveGrain({ ...p, grainOverride: '' });
+  const auto = effectiveGrain({ ...p, grainOverride: '' });
   const opts = [['', `Auto: ${grainLabel(auto)}`], ...GRAIN_CHOICES];
   return `<select data-k="grain" class="${p.grainOverride ? 'overridden' : ''}">${opts.map(([v, l]) =>
     `<option value="${v}" ${v === (p.grainOverride || '') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
@@ -357,7 +358,7 @@ const clOpts = () => ({ waste: 15, ...(job.settings.cutList || {}), kerf: 0.125 
 const kindOf = (mat, mrows) => job.cutListKinds?.[mat] || guessKind(mat, mrows);
 function cutStock(rows) {
   const o = clOpts(), sh = job.settings.sheet || {};
-  const key = JSON.stringify([rows.map((r) => [r.material, r.qty, r.length, r.width, r.thickness, r.grainSet, r.part]), job.cutListKinds || {}, o, sh.sheetW, sh.sheetH]);
+  const key = JSON.stringify([rows.map((r) => [r.material, r.qty, r.length, r.width, r.thickness, r.grainSet, r.grain, r.part]), job.cutListKinds || {}, o, sh.sheetW, sh.sheetH]);
   if (stockCache.key === key) return stockCache.map;
   const map = new Map();
   for (const mat of [...new Set(rows.map((r) => r.material))]) {
@@ -366,8 +367,8 @@ function cutStock(rows) {
     if (kind === 'lumber') { map.set(mat, { kind, sizes: linealStock(mrows, o.waste) }); continue; }
     const W = sh.sheetW || 96, H = sh.sheetH || 48;
     let nest = null;
-    // parts turn either way on the sheet unless a grain was picked for them
-    try { nest = nestParts(sheetStockParts(mrows).map((p, i) => ({ ...p, grain: ['length', 'width'].includes(mrows[i].grainSet) ? mrows[i].grainSet : 'none' })), { sheetW: W, sheetH: H, trim: 0, endTrim: 0, spacing: o.kerf || 0, respectGrain: true, searchMs: 120 }); }
+    // grain as picked in the parts list, else as modelled (along the length); Any / none turn either way
+    try { nest = nestParts(sheetStockParts(mrows).map((p, i) => { const gr = mrows[i].grainSet || mrows[i].grain || 'length'; return { ...p, grain: ['length', 'width'].includes(gr) ? gr : 'none' }; }), { sheetW: W, sheetH: H, trim: 0, endTrim: 0, spacing: o.kerf || 0, respectGrain: true, searchMs: 120 }); }
     catch (err) { console.warn('cut list sheet layout failed', err); }
     map.set(mat, { kind, W, H, sheets: nest?.sheets || [], unplaced: nest?.unplaced || [] });
   }
@@ -1009,14 +1010,18 @@ async function planAll() {
 // The sheet's tabs and the bit's paths they sit on: from its toolpaths, or,
 // before Toolpath, worked out from the layout alone (the same tabs the toolpath
 // will cut), so they show and can be placed straight after Nest.
+// Toolpaths out of date (a screw added or moved, say): the tabs as they'll be
+// planned now, from the layout and the sheet's current screws.
 function tabsView(item) {
-  if (item.tp) return { tabs: item.tp.tabs || [], tabPaths: item.tp.tabPaths || [] };
+  if (item.tp && !item.tpStale) return { tabs: item.tp.tabs || [], tabPaths: item.tp.tabPaths || [] };
   if (!item.cfg || !item.sheet) return null;
-  if (!item.tabView || item.tabViewCfg !== item.cfg || item.tabViewSheet !== item.sheet) {
+  const screwKey = JSON.stringify(item.sheet.screws || []) + (item.sheet.screwsManual ? 'm' : '');
+  if (!item.tabView || item.tabViewCfg !== item.cfg || item.tabViewSheet !== item.sheet || item.tabViewScrews !== screwKey) {
     try { item.tabView = sheetTabs(item.sheet, item.cfg); }
     catch (err) { console.warn('tab preview failed', err); item.tabView = { tabs: [], tabPaths: [] }; }
     item.tabViewCfg = item.cfg;
     item.tabViewSheet = item.sheet;
+    item.tabViewScrews = screwKey;
   }
   return item.tabView;
 }
@@ -1157,7 +1162,35 @@ function setSheetScrews(item, list) {
   if (list) m[item.idx] = list.map((q) => ({ x: +q.x.toFixed(3), y: +q.y.toFixed(3) }));
   else delete m[item.idx];
   if (!Object.keys(m).length) delete job.manualScrews[item.mkey];
+  const before = (item.sheet.screws || []).map((q) => [q.x, q.y]);
   applyManualScrews(item.sheet, list);
+  item.tabView = null;   // automatic tabs are planned after the screws: worked out again
+  // Tabs placed by hand stay as they are, but a new screw still gets a tab
+  // beside it (the waste is held hardest there): on each part edge within 3"
+  // of it, at the point nearest the screw, unless a tab is already that close.
+  if (item.sheet.tabsManual && usesTabs(item.cfg) && list) {
+    const added = list.filter((q) => !before.some((b) => Math.hypot(b[0] - q.x, b[1] - q.y) < 1e-3));
+    const paths = tabsView(item)?.tabPaths || [];
+    const tabs = (item.sheet.tabsManual || []).map((t) => ({ x: t.x, y: t.y }));
+    const reach = 3 + (item.cfg.tool?.dia || 0) / 2;
+    let addedTabs = 0;
+    for (const q of added) {
+      for (const L of paths) {
+        if (!L) continue;
+        let bp = null, bd = Infinity;
+        for (let i = 0; i < L.length; i++) {
+          const a = L[i], b = L[(i + 1) % L.length], dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+          const t = l2 ? Math.max(0, Math.min(1, ((q.x - a[0]) * dx + (q.y - a[1]) * dy) / l2)) : 0;
+          const p2 = [a[0] + t * dx, a[1] + t * dy], d = Math.hypot(p2[0] - q.x, p2[1] - q.y);
+          if (d < bd) { bd = d; bp = p2; }
+        }
+        if (!bp || bd > reach || tabs.some((t) => Math.hypot(t.x - q.x, t.y - q.y) <= reach)) continue;
+        const hit = tabOnPaths(paths, bp, item.cfg.tool, item.cfg.tabs || {});
+        if (hit && !hit.short) { tabs.push({ x: hit.c[0], y: hit.c[1] }); addedTabs++; }
+      }
+    }
+    if (addedTabs) { setSheetTabs(item, tabs); return; }   // (setSheetTabs marks the sheet edited)
+  }
   markEdited(item);
 }
 

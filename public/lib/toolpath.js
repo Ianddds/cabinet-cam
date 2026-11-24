@@ -9,6 +9,9 @@ import { offset, union, intersect, difference, inRegion, area } from './clip.js'
 import { usesSkin, usesTabs } from './settings.js';
 import { machineTime } from './machine.js';
 
+// chain order: a link up to this long from one leg into the next is fed at
+// depth across floor not cut yet (it's pocket all the way), not lifted over
+const CHAIN_LINK = 1.0;
 function levels(target, step, minFirst = 0) {
   const out = [];
   const n = Math.max(1, Math.ceil(target / step - 1e-6));
@@ -852,7 +855,13 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
   const lv = [];
   let fromRecords = false;
   const prevZ = new Map();
-  for (const [ci, cl] of classes.entries()) for (const z of levels(cl.d, tool.stepdown, tool.minStepdown)) {
+  // Finish pass (a setting): the rows stop finishAllow short of every wall and
+  // the wall passes run once, at the bottom depth, as a light skim. Without it
+  // each leg is cut whole, its wall pass last (see the chain order in runGroup).
+  const finishPass = !!opts.finishPass;
+  const allow = finishPass ? Math.max(0, opts.finishAllow ?? 0.015) : 0;
+  for (const [ci, cl] of classes.entries()) for (const [zi, z, zs] of levels(cl.d, tool.stepdown, tool.minStepdown).map((v, i, a) => [i, v, a])) {
+    const lastZ = zi === zs.length - 1;
     const zTop = prevZ.get(ci) ?? 0;   // material top here: the last level of this depth, or the sheet top
     prevZ.set(ci, z);
     const members = cl.members;
@@ -885,14 +894,18 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
     const reachPart = offset(floor, r - 0.005, 'round');   // rows only where they cut this floor
     const legPlans = [];
     const rowSets = [];
+    // with a finish pass the rows keep the allowance off every wall
+    // (only from walls: open edges and areas cut anyway keep their full run-out)
+    const material = allow > 0 ? difference(partRegion, union([...floor, ...openExtra], [], 'nonzero')).filter((l) => area([l]) > 1e-7) : [];
+    const rowsAllowed = allow > 0 && material.length ? difference(allowed, offset(material, r + allow - 1e-4, 'round')).filter((l) => area([l]) > 1e-6) : allowed;
     if (legs) {
       const rect = (lg, e) => [[lg.x0 - e, lg.y0 - e], [lg.x1 + e, lg.y0 - e], [lg.x1 + e, lg.y1 + e], [lg.x0 - e, lg.y1 + e]];
-      for (const leg of legs) {
+      for (const [legI, leg] of legs.entries()) {
         // the leg's area, run on past its open edges, but not into another leg
         // (a junction square lies in both legs: it stays in both here, and
         // leg.clip gives it to the longer one)
         const others = legs.filter((o) => o !== leg).map((o) => rect(o, 0));
-        let region = intersect(allowed, [rect(leg, ext + 1e-3)]).filter((l) => area([l]) > 1e-5);
+        let region = intersect(rowsAllowed, [rect(leg, ext + 1e-3)]).filter((l) => area([l]) > 1e-5);
         if (others.length) region = difference(region, difference(union(others, [], 'nonzero'), [rect(leg, 1e-3)]));
         const mine = leg.clip ? difference(region, leg.clip) : region;
         const use = mine.filter((l) => area([l]) > 1e-5);
@@ -909,20 +922,34 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
           const [c0, c1] = leg.alongX ? [leg.y0, leg.y1] : [leg.x0, leg.x1];
           const [u0, u1] = leg.alongX ? [ub.y0, ub.y1] : [ub.x0, ub.x1];
           const w0 = wallAt(c0), w1 = wallAt(c1);
-          let lo = w0 ? c0 + r : u0, hi = w1 ? c1 - r : u1;
+          let lo = w0 ? c0 + r + allow : u0, hi = w1 ? c1 - r - allow : u1;
           if (hi < lo) lo = hi = (lo + hi) / 2;
           range = [lo, hi];
         }
         // (a row on a wall line is trimmed below to where the wall pass doesn't
         // already cut - beside a toe-kick notch, say - and any stub left dropped)
-        if (use.length) rowSets.push({ alongX: leg.alongX, rows: planRows(use, leg.alongX, legStep, false, range) });
+        if (use.length) {
+          const rows = planRows(use, leg.alongX, legStep, false, range);
+          // finish pass: a row on each wall line too, from the full region. It's
+          // trimmed below wherever a wall pass runs, so it's only kept where the
+          // wall pass doesn't reach (beside a toe-kick notch, say)
+          if (allow > 0 && ub) {
+            let full = intersect(allowed, [rect(leg, ext + 1e-3)]).filter((l) => area([l]) > 1e-5);
+            if (others.length) full = difference(full, difference(union(others, [], 'nonzero'), [rect(leg, 1e-3)]));
+            if (leg.clip) full = difference(full, leg.clip);
+            full = full.filter((l) => area([l]) > 1e-5);
+            const [c0, c1] = leg.alongX ? [leg.y0, leg.y1] : [leg.x0, leg.x1];
+            if (full.length) for (const [w, at] of [[wallAt(c0), c0 + r + 1e-4], [wallAt(c1), c1 - r - 1e-4]]) if (w) rows.push(...planRows(full, leg.alongX, legStep, false, [at, at]));
+          }
+          rowSets.push({ alongX: leg.alongX, leg: legI, rows });
+        }
       }
     } else {
       const cb = bbox(core.flat());
       const ax = cb.w >= cb.h;
       rowSets.push({ alongX: ax, rows: planRows(allowed, ax, legStep, false, null) });
     }
-    for (const { alongX, rows } of rowSets) {
+    for (const { alongX, rows, leg: legI } of rowSets) {
       const across = (p) => (alongX ? p[1] : p[0]);
       const segs = [];
       for (const row of rows) {
@@ -975,6 +1002,7 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
       const order = [posList[si], ...(up.length <= down.length ? [...up, ...down] : [...down, ...up])];
       const lp = order.map((pos) => segs.filter((sg) => Math.abs(across(sg[0]) - pos) < 1e-3));
       lp.alongX = alongX;
+      lp.leg = legI;
       legPlans.push(lp);
     }
     // each relief goes with the finishing chain that passes nearest it
@@ -986,7 +1014,64 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
       for (const c of chains) { const d = distToPoly(target, c.pts, c.closed); if (d < bd) { bd = d; bc = c; } }
       if (bc && bd < r + 0.05) bc.reliefs.push(q); else loose.push(q);
     }
-    lv.push({ cls: ci, z, zTop, allowed, plunges, legPlans, chains, loose, anyLink: !legs });
+    // Chain order (no finish pass): each wall pass is split where it crosses from
+    // one leg into the next, and each piece is cut as that leg's last row, so a
+    // leg is finished before the bit moves on. Closed laps (a pocket walled all
+    // round) stay as they were. With a finish pass the wall passes wait for the
+    // bottom depth; above it they're left off (their reliefs plunge on their own).
+    let wallPcs = [];
+    let runChains = chains;
+    if (legs && !finishPass) {
+      const tolE = r + ext + 0.02;
+      const inRect = (p, lg, e) => p[0] >= lg.x0 - e && p[0] <= lg.x1 + e && p[1] >= lg.y0 - e && p[1] <= lg.y1 + e;
+      const rectD = (p, lg) => Math.hypot(Math.max(lg.x0 - p[0], 0, p[0] - lg.x1), Math.max(lg.y0 - p[1], 0, p[1] - lg.y1));
+      const owner = (p) => {
+        const cand = legs.map((lg, i) => i).filter((i) => inRect(p, legs[i], tolE));
+        const own = cand.filter((i) => !(legs[i].clip && inRegion(p, legs[i].clip)));
+        if (own.length) return own[0];
+        if (cand.length) return cand[0];
+        return legs.reduce((b, lg, i) => (rectD(p, lg) < rectD(p, legs[b]) ? i : b), 0);
+      };
+      for (const c of chains) {
+        if (c.closed) continue;
+        // pieces of at most 0.05 so a run changes leg where the chain crosses into the next
+        const pts = [];
+        for (let k = 0; k + 1 < c.pts.length; k++) {
+          const a = c.pts[k], b = c.pts[k + 1], n = Math.max(1, Math.ceil(dist(a, b) / 0.05));
+          for (let i = 0; i < n; i++) pts.push([a[0] + ((b[0] - a[0]) * i) / n, a[1] + ((b[1] - a[1]) * i) / n]);
+        }
+        pts.push(c.pts[c.pts.length - 1]);
+        const who = pts.slice(0, -1).map((p, i) => owner([(p[0] + pts[i + 1][0]) / 2, (p[1] + pts[i + 1][1]) / 2]));
+        // a run shorter than a bit width (the arc round a corner) goes with the run before it
+        const runs = [];
+        for (let i = 0; i < who.length; i++) {
+          if (runs.length && runs[runs.length - 1].leg === who[i]) runs[runs.length - 1].to = i + 1;
+          else runs.push({ leg: who[i], from: i, to: i + 1 });
+        }
+        const lenOf = (rn) => { let L = 0; for (let i = rn.from; i < rn.to; i++) L += dist(pts[i], pts[i + 1]); return L; };
+        for (let i = 0; i < runs.length; i++) {
+          if (runs.length > 1 && lenOf(runs[i]) < tool.dia) {
+            const j = i > 0 ? i - 1 : i + 1;
+            runs[j].from = Math.min(runs[j].from, runs[i].from); runs[j].to = Math.max(runs[j].to, runs[i].to);
+            runs.splice(i, 1); i = -1;
+          }
+        }
+        for (const rn of runs) wallPcs.push({ pts: simplify(pts.slice(rn.from, rn.to + 1), 1e-7), closed: false, either: true, leg: rn.leg, reliefs: [] });
+      }
+      runChains = chains.filter((c) => c.closed);
+    } else if (finishPass && !lastZ) {
+      runChains = [];
+    }
+    // each relief goes with the wall pass (or wall piece) that passes nearest it
+    for (const c of runChains) c.reliefs = [];
+    const loose2 = [];
+    for (const q of plunges) {
+      const target = q.approach ? q.approach[1] : q.c;
+      let bc = null, bd = Infinity;
+      for (const c of [...runChains, ...wallPcs]) { const d = distToPoly(target, c.pts, c.closed); if (d < bd) { bd = d; bc = c; } }
+      if (bc && bd < r + 0.05) bc.reliefs.push(q); else loose2.push(q);
+    }
+    lv.push({ cls: ci, z, zTop, allowed, plunges, legPlans, chains: runChains, walls: wallPcs, loose: loose2, anyLink: !legs, chainOrder: !!legs, legsAlong: legs ? legs.map((lg) => lg.alongX) : [], legRects: legs ? legs.map((lg) => ({ x0: lg.x0, y0: lg.y0, x1: lg.x1, y1: lg.y1 })) : null });
   }
   if (!lv.length) return null;
   return { label, desc, depth: depths[depths.length - 1], levels: lv, fromRecords };
@@ -1281,6 +1366,12 @@ export function placeTabs(loop, opt, tool) {
 // the end fifth of the part, at least one tab-width in), not just in the middle.
 // Sets x.tabs.spans = [[a, b], ...] (flat tops, tool-centre XY) on each item.
 const MIN_LIGAMENT = 0.25; // inch
+// a thin strip of waste (less than MIN_LIGAMENT) is held this close to a screw in it
+const SCREW_HOLD = 6;
+// every outside corner of a part gets a tab this close (centre to corner), so no end lifts and chatters
+const CORNER_REACH = 3;
+// a part edge passing this close to a screw gets a tab at the point nearest it
+const SCREW_TAB_REACH = 3;
 // Smaller parts get more tabs: Min per part at the Small parts size or bigger,
 // one more each time the area halves below it, never more than Max per part.
 // (Little weight or friction holds a small part; the bit pushes it just as hard.)
@@ -1339,18 +1430,22 @@ export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
     return false;
   };
   const classify = (me, p, n) => {
-    let off = false;
+    let off = 0;
     // a tab needs MIN_LIGAMENT of material past the cut; the thin strip left
-    // along the sheet edge by the trim margin doesn't count
+    // along the sheet edge by the trim margin doesn't count, except within
+    // SCREW_HOLD of a screw in it: the screw holds that bit of strip down
     for (const d of [0.02, 0.1, MIN_LIGAMENT]) {
       const q = [p[0] + n[0] * (r + d), p[1] + n[1] * (r + d)];
       for (const o of info) {
         if (o === me || q[0] < o.bb.x0 - r || q[0] > o.bb.x1 + r || q[1] < o.bb.y0 - r || q[1] > o.bb.y1 + r) continue;
         if (inRegion(q, [o.x.g.outline]) || nearLoop(q, o.loop, r - 1e-4)) return o.x.tabs ? o.x.pi : 'open';
       }
-      if (q[0] < 0 || q[1] < 0 || q[0] > W || q[1] > H) off = true;
+      if (q[0] < 0 || q[1] < 0 || q[0] > W || q[1] > H) { off = d; break; }
     }
-    if (off) return 'open';
+    if (off) {
+      const q = [p[0] + n[0] * (r + 0.05), p[1] + n[1] * (r + 0.05)];
+      return off > 0.1 && screwPts.length && screwDist(p) <= SCREW_HOLD && anchoredAt(q) ? 'free' : 'open';
+    }
     // skeleton, but is that piece held down?
     return anchoredAt([p[0] + n[0] * (r + MIN_LIGAMENT), p[1] + n[1] * (r + MIN_LIGAMENT)]) ? 'free' : 'loose';
   };
@@ -1412,106 +1507,127 @@ export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
   // a tab's centre may go anywhere on a run from need/2 in from either end
   const slotRange = (rn) => [rn.t0 + need / 2, rn.t1 - need / 2];
   const clash = (me, P) => me.spans.some((sp2) => dist(mid(sp2), P) < need);
-  // first, both ends of every long part: a tab to anchored waste (or a shared
-  // bridge) within its end fifth, before the even spread uses up the edges
-  for (const me of info) {
-    if (!me.runs) continue;
-    me.anch = 0;
-    const ax = me.bb.w >= me.bb.h ? 0 : 1;
-    const lo = ax ? me.bb.y0 : me.bb.x0, hi = ax ? me.bb.y1 : me.bb.x1, L = hi - lo;
-    if (L >= 3 * need) {
-      const E = Math.max(need, 0.2 * L);
-      for (const [z0, z1, endAt] of [[lo, lo + E, lo], [hi - E, hi, hi]]) {
-        if (me.spans.some((sp2) => { const c = mid(sp2)[ax]; return c >= z0 - 1e-6 && c <= z1 + 1e-6; })) continue;
-        let best = null;
-        for (const rn of me.runs.filter((q) => q.cls === 'free' || typeof q.cls === 'number')) {
-          const [c0, c1] = slotRange(rn);
-          if (c1 < c0) continue;
-          // the run's slot range that lies in the end zone (runs are straight lines)
-          const pa = at(rn, c0)[ax], pb = at(rn, c1)[ax];
-          const tAt = (v) => (Math.abs(pb - pa) < 1e-9 ? null : c0 + ((v - pa) / (pb - pa)) * (c1 - c0));
-          let cands;
-          if (Math.abs(pb - pa) < 1e-9) cands = pa >= z0 - 1e-6 && pa <= z1 + 1e-6 ? [(c0 + c1) / 2] : [];   // an end edge: its middle
-          else cands = [tAt(endAt)].map((t) => Math.max(c0, Math.min(c1, t))).filter((t) => { const v = at(rn, t)[ax]; return v >= z0 - 1e-6 && v <= z1 + 1e-6; });
-          for (const t of cands) {
-            const P = at(rn, t);
-            if (clash(me, P) || !hasRoom(me, rn, 2)) continue;
-            // to anchored waste beats a bridge to the next part (which only holds
-            // if that part is held)
-            const score = Math.abs(P[ax] - endAt) + 0.25 * screwDist(P) + (rn.cls === 'free' ? 0 : 6);
-            if (!best || score < best.score) best = { rn, t, score };
-          }
-        }
-        if (best?.rn.cls === 'free') { me.spans.push(spanOn(best.rn, best.t)); useOne(me, best.rn); me.anch++; }
-        else if (best) bridge(me, best.rn, best.t, true);
-      }
-    }
-  }
-  // shared edges: tabs placed once, on both parts
-  for (const me of info) {
-    if (!me.runs) continue;
-    for (const rn of me.runs) {
-      if (typeof rn.cls !== 'number' || rn.cls < me.x.pi) continue;   // each pair once, from the lower index
-      const other = info.find((o) => o.x.pi === rn.cls);
-      const theirs = (other.runs || []).filter((q) => q.cls === me.x.pi);
-      const len = rn.t1 - rn.t0;
-      const k = Math.min(Math.floor(len / need), Math.round(len / (opt.spacing || 18)));
-      for (let i = 0; i < k; i++) bridge(me, rn, rn.t0 + (len * (i + 0.5)) / k, false, other, theirs);
-    }
-  }
-  // the rest of each part's tabs go on edges facing anchored skeleton
-  for (const me of info) {
-    if (!me.runs) continue;
-    const perim = me.loop.reduce((a, p, i) => a + dist(p, me.loop[(i + 1) % me.loop.length]), 0);
-    const want = Math.max(minTabsFor(opt, me.x.area), Math.round(perim / (opt.spacing || 18)));
-    const free = me.runs.filter((rn) => rn.cls === 'free');
-    // the rest: spread along anchored edges, the edges nearest a screw first
-    const fr = free.map((rn) => {
-      const len = rn.t1 - rn.t0;
-      return { rn, len, cap: Math.min(Math.floor(len / need), budget(rn.edgeLen)), k: 0, sd: screwDist(at(rn, (rn.t0 + rn.t1) / 2)) };
-    });
-    const room = fr.reduce((a, f) => a + f.cap, 0);
-    let n = Math.min(room, Math.max(room > 0 && !me.anch ? 1 : 0, want - me.shared - me.anch));
-    const better = (f, b) => { const sf = f.len / (f.k + 1), sb = b.len / (b.k + 1); return Math.abs(sf - sb) > 1e-6 ? sf > sb : f.sd < b.sd; };
-    for (; n > 0; n--) {
-      let best = null;
-      for (const f of fr) if (f.k < f.cap && hasRoom(me, f.rn) && (!best || better(f, best))) best = f;
-      if (!best) {
-        // every edge is at its budget: still give the part one tab to anchored waste if it has none
-        if (!me.anch && !fr.some((f) => f.k) && fr.length) best = fr.reduce((b, f) => (f.cap > 0 && (!b || f.sd < b.sd) ? f : b), null);
-        if (!best) break;
-      }
-      best.k++; useOne(me, best.rn);
-    }
-    for (const f of fr) for (let i = 0; i < f.k; i++) {
-      const P = f.rn.t0 + (f.len * (i + 0.5)) / f.k;
-      if (clash(me, at(f.rn, P))) continue;   // an end tab is already there
-      me.spans.push(spanOn(f.rn, P)); me.anch++;
-    }
-    // Min per part is a floor: when the edges' budgets, neighbours and the sheet
-    // edge leave a part short, add tabs where they're farthest from the ones it
-    // has — to anchored waste first, else a bridge to the next part
-    const minTabs = minTabsFor(opt, me.x.area);
-    for (let guard = 0; me.spans.length < minTabs && guard < 12; guard++) {
+  // Tabs go in after the screws, in three steps (each adds a tab to held waste,
+  // or a shared bridge that holds both parts):
+  //  1. next to each screw: the waste is held hardest right there
+  //  2. at every outside corner (within CORNER_REACH), so no end lifts and chatters
+  //  3. the rest into the biggest gaps, part by part, the part furthest short first
+  const usable = (rn) => rn.cls === 'free' || typeof rn.cls === 'number';
+  const holdsBoth = (o, P) => !clash(o, P);
+  // put a tab at t on run rn of part me (to held waste, or bridged to the neighbour); true if placed
+  const place = (me, rn, t) => {
+    const P = at(rn, t);
+    if (clash(me, P)) return false;
+    if (rn.cls === 'free') { me.spans.push(spanOn(rn, t)); useOne(me, rn); me.anch++; return true; }
+    const other = info.find((o) => o.x.pi === rn.cls);
+    if (!other || !holdsBoth(other, P)) return false;
+    return bridge(me, rn, t, 'min', other);
+  };
+  // the slot on a run nearest a point (null if the run has no room for a tab)
+  const nearestSlot = (rn, P) => {
+    const [c0, c1] = slotRange(rn);
+    if (c1 < c0 - 1e-9) return null;
+    const t = (P[0] - rn.a[0]) * rn.u[0] + (P[1] - rn.a[1]) * rn.u[1];
+    return Math.max(c0, Math.min(c1, t));
+  };
+  for (const me of info) if (me.runs) me.anch = 0;
+  // 1. screws
+  for (const S of screwPts) {
+    for (const me of info) {
+      if (!me.runs) continue;
       let best = null;
       for (const rn of me.runs) {
-        if (rn.cls !== 'free' && typeof rn.cls !== 'number') continue;
-        const [c0, c1] = slotRange(rn);
-        if (c1 < c0) continue;
-        const n2 = Math.max(1, Math.ceil((c1 - c0) / 0.5));
-        for (let i = 0; i <= n2; i++) {
-          const t = c0 + ((c1 - c0) * i) / n2;
-          const P = at(rn, t);
-          if (clash(me, P)) continue;
-          const far = me.spans.length ? Math.min(...me.spans.map((sp2) => dist(mid(sp2), P))) : 1e3;
-          const score = far + (rn.cls === 'free' ? 3 : 0);
-          if (!best || score > best.score) best = { rn, t, score };
-        }
+        if (!usable(rn)) continue;
+        const t = nearestSlot(rn, S);
+        if (t == null) continue;
+        const d = dist(at(rn, t), S);
+        if (d <= SCREW_TAB_REACH + r && (!best || d < best.d)) best = { rn, t, d };
       }
-      if (!best) break;
-      if (best.rn.cls === 'free') { me.spans.push(spanOn(best.rn, best.t)); useOne(me, best.rn); me.anch++; }
-      else if (!bridge(me, best.rn, best.t, 'min')) break;
+      if (best && !me.spans.some((sp2) => dist(mid(sp2), S) <= SCREW_TAB_REACH + r)) place(me, best.rn, best.t);
     }
+  }
+  // 2. corners: each convex corner of the cut path with a straight run beside it
+  for (const me of info) {
+    if (!me.runs) continue;
+    const L = me.loop, n = L.length;
+    for (let i = 0; i < n; i++) {
+      const A = L[(i - 1 + n) % n], C = L[i], B = L[(i + 1) % n];
+      const cr = (C[0] - A[0]) * (B[1] - C[1]) - (C[1] - A[1]) * (B[0] - C[0]);
+      if ((me.ccw ? cr : -cr) <= 1e-9) continue;   // not an outside corner
+      if (dist(A, C) < need && dist(C, B) < need) continue;   // a little notch or tooth
+      if (me.spans.some((sp2) => dist(mid(sp2), C) <= CORNER_REACH)) continue;
+      let best = null;
+      for (const rn of me.runs) {
+        if (!usable(rn)) continue;
+        const endsHere = rn.edge === (i - 1 + n) % n, startsHere = rn.edge === i;
+        if (!endsHere && !startsHere) continue;
+        const t = nearestSlot(rn, C);
+        if (t == null) continue;
+        const P = at(rn, t), d = dist(P, C);
+        if (d > CORNER_REACH || clash(me, P)) continue;
+        // held waste beats a bridge (which holds only if the neighbour is held), unless
+        // the bridge also holds a corner of the neighbour that has no tab yet; then
+        // nearest the corner, then a screw
+        let both = 0;
+        if (typeof rn.cls === 'number') {
+          const o = info.find((q) => q.x.pi === rn.cls);
+          if (o && o.loop.some((V) => dist(V, P) <= CORNER_REACH && !o.spans.some((sp2) => dist(mid(sp2), V) <= CORNER_REACH))) both = 2;
+        }
+        const score = d + (rn.cls === 'free' ? 0 : 1.5) - both + 0.05 * screwDist(P);
+        if (!best || score < best.score) best = { rn, t, score };
+      }
+      if (best) place(me, best.rn, best.t);
+    }
+  }
+  // 3. the rest: into the biggest gap
+  const wantOf = (me) => {
+    const perim = me.loop.reduce((acc, q, i) => acc + dist(q, me.loop[(i + 1) % me.loop.length]), 0);
+    return Math.max(minTabsFor(opt, me.x.area), Math.round(perim / (opt.spacing || 18)));
+  };
+  const gapAt = (o, P) => (o.spans.length ? Math.min(...o.spans.map((sp2) => dist(mid(sp2), P))) : 1e3);
+  const stuck = new Set();
+  for (let guard = 0; guard < 2000; guard++) {
+    let me = null, short = 0;
+    for (const o of info) {
+      if (!o.runs || stuck.has(o)) continue;
+      const k = wantOf(o) - o.spans.length;
+      if (k > short) { short = k; me = o; }
+    }
+    if (!me) break;
+    let best = null;
+    for (const rn of me.runs) {
+      if (!usable(rn)) continue;
+      const [c0, c1] = slotRange(rn);
+      if (c1 < c0 - 1e-9) continue;
+      const other = typeof rn.cls === 'number' ? info.find((o) => o.x.pi === rn.cls) : null;
+      const n2 = Math.max(1, Math.ceil((c1 - c0) / 0.25));
+      for (let i = 0; i <= n2; i++) {
+        const t = c0 + ((c1 - c0) * i) / n2;
+        const P = at(rn, t);
+        if (clash(me, P) || (other && clash(other, P))) continue;
+        // a bridge's gap counts on both parts; ties go to held waste
+        const gap = other ? Math.min(gapAt(me, P), gapAt(other, P)) : gapAt(me, P);
+        const score = gap + (rn.cls === 'free' ? 0.01 : 0);
+        if (!best || score > best.score) best = { rn, t, score };
+      }
+    }
+    if (!best || !place(me, best.rn, best.t)) stuck.add(me);
+  }
+  // a part with no tab to held waste still gets one if it has room (the chain check below needs it)
+  for (const me of info) {
+    if (!me.runs || me.anch) continue;
+    let best = null;
+    for (const rn of me.runs) {
+      if (rn.cls !== 'free') continue;
+      const [c0, c1] = slotRange(rn);
+      if (c1 < c0 - 1e-9) continue;
+      for (const t of [c0, (c0 + c1) / 2, c1]) { const P = at(rn, t); if (!clash(me, P) && (!best || screwDist(P) < best.sd)) best = { rn, t, sd: screwDist(P) }; }
+    }
+    if (best) place(me, best.rn, best.t);
+  }
+  for (const me of info) {
+    if (!me.runs) continue;
+    const minTabs = minTabsFor(opt, me.x.area);
     me.free = me.anch;
     if (me.spans.length && me.spans.length < minTabs) warnings.push(`${me.x.label}: room for ${me.spans.length} of ${minTabs} tabs — its edges are too short or face the sheet edge`);
     if (!me.spans.length) warnings.push(`${me.x.label}: no straight run with material past it long enough for a tab`);
@@ -2184,7 +2300,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
     const label = cl.pis.map((k) => geo[k].label).join(' + ');
     const g = joined ? cl.g : geo[cl.pi].g;
     const members = joined ? [...cl.members.map((p) => ({ ...p, walls: undefined })), ...cl.bridges] : cl.members;
-    const plan = planGroup(members, g, dado, warnings, label, { finishClimb: fd !== 'conventional', finishEither: fd === 'either', overtravel: overtravel(), avoid: avoidFor(cl.pis), onClip: () => clippedParts.add(label) });
+    const plan = planGroup(members, g, dado, warnings, label, { finishClimb: fd !== 'conventional', finishEither: fd === 'either', finishPass: !!cfg.pocketFinish, finishAllow: cfg.finishAllow ?? 0.015, overtravel: overtravel(), avoid: avoidFor(cl.pis), onClip: () => clippedParts.add(label) });
     if (plan) plans.push({ ...plan, pi: cl.pis[0], pis: cl.pis, joined, hopReg: joined ? offset([g.outline], reachR, 'miter') : null, id: plans.length, center: [(g.box.x0 + g.box.x1) / 2, (g.box.y0 + g.box.y1) / 2] });
   }
   if (clippedParts.size) warnings.push(`${clippedParts.size} part${clippedParts.size === 1 ? '' : 's'} (${[...clippedParts].slice(0, 4).join(', ')}${clippedParts.size > 4 ? '…' : ''}): a dado runs out toward a part closer than a bit width plus 0.05", so it stops 0.03" short of that part instead of running half the bit past the edge`);
@@ -2224,6 +2340,9 @@ function sheetPlan(sheet, cfg, joinSkip) {
     if (L.spiral) return L.spiral.map((p) => p[0]);
     const firstRows = L.legPlans.flatMap((lp) => lp[0] || []).flatMap((sg) => [sg[0], sg[1]]);
     if (firstRows.length) return firstRows;
+    // chain order with no rows (a dado one bit wide): its wall pieces' ends
+    const wallEnds = (L.walls || []).flatMap((w) => [w.pts[0], w.pts[w.pts.length - 1]]);
+    if (wallEnds.length) return wallEnds;
     return L.chains.flatMap((c) => (c.closed ? c.pts : c.either ? [c.pts[0], c.pts[c.pts.length - 1]] : [c.pts[0]]));
   };
   const startsOf = (pl) => [...new Set(pl.levels.map((L) => L.cls))].flatMap((ci) => startsOfLevel(pl.levels.find((L) => L.cls === ci)));
@@ -2240,6 +2359,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
     if (only == null) P.comment(`${pl.label} pocket ${pl.desc}${pl.fromRecords ? ' (cut records)' : ''}`);
     let first = true;
     let cutSegs = [], prevL = null, prevCut = [];
+    const groupCut = [];   // every cut in this group so far, with its depth
     let sel = null;   // where the first pick of a class is made from (its chosen start)
     const posNow = () => (P.x == null ? home : [P.x, P.y]);
     const pickPos = () => { const p = sel || posNow(); sel = null; return p; };
@@ -2263,11 +2383,11 @@ function sheetPlan(sheet, cfg, joinSkip) {
         for (let k = 0; k <= n; k++) {
           const p = [a[0] + ((b[0] - a[0]) * k) / n, a[1] + ((b[1] - a[1]) * k) / n];
           if (!okAt(p)) return false;
-          if (!short && !L.anyLink && !clearedIn(cutSegs, p) && dist(p, a) > rD && dist(p, b) > rD) return false;
+          if (!short && !L.anyLink && !(L.chainOrder && Ln <= CHAIN_LINK) && !clearedIn(cutSegs, p) && dist(p, a) > rD && dist(p, b) > rD) return false;
         }
         return true;
       };
-      const feedTo = (x, y) => { cutSegs.push([[P.x, P.y], [x, y]]); P.feed(x, y, dado.feed); };
+      const feedTo = (x, y) => { cutSegs.push([[P.x, P.y], [x, y]]); groupCut.push({ a: [P.x, P.y], b: [x, y], z: Math.max(P.z, L.z) }); P.feed(x, y, dado.feed); };
       // get to (x, y) at this level's depth
       // Ramp into the cut along the path about to be cut (ahead), at the ramp
       // angle, instead of plunging: start that far along it, come back down to
@@ -2317,7 +2437,16 @@ function sheetPlan(sheet, cfg, joinSkip) {
           return;
         }
         if (stayDown(here, [x, y])) feedTo(x, y);
-        else if (!rampTo(x, y, ahead, 'hop')) P.hopTo(x, y, L.z, L.zTop);
+        else if (!rampTo(x, y, ahead, 'hop')) {
+          // landing where this depth is already cut all round the bit: straight
+          // down to just above that floor, no slow entry from the top
+          // (anything this group cut already, at any depth: a dado's floor where it
+          // runs into a deeper rabbet counts too)
+          const ring = [[x, y], ...[...Array(12)].map((_, k) => [x + Math.cos((k * Math.PI) / 6) * (rD - 0.005), y + Math.sin((k * Math.PI) / 6) * (rD - 0.005)])];
+          const floorAt = (q) => groupCut.reduce((zz, c) => (c.z < zz && distToSeg(q, c.a, c.b) <= rD - 1e-4 ? c.z : zz), 0);
+          const top = Math.max(L.z, Math.min(L.zTop, Math.max(...ring.map(floorAt))));
+          P.hopTo(x, y, L.z, top);
+        }
       };
       const runPath = (path, base) => {
         P.op = base;
@@ -2350,11 +2479,17 @@ function sheetPlan(sheet, cfg, joinSkip) {
         // corner of a U or L): free up to an inch, so it's cut from whichever
         // end the bit is at instead of waiting on a row that runs the part's length
         const shortLen = cfg.stubsFree === false ? -1 : 1.0 + 1e-6;
-        L.legPlans.forEach((lp, li) => lp.forEach((group, rank) => group.forEach((sg) => {
+        L.legPlans.forEach((lp, k) => lp.forEach((group, rank) => group.forEach((sg) => {
           // the row's extent along the leg: it waits only for earlier rows beside it
           const ax = lp.alongX === false ? 1 : 0;
-          items.push({ sg, li, rank, free: dist(sg[0], sg[1]) <= (sg.cutShort ? Math.max(stubLen, shortLen) : stubLen), lo: Math.min(sg[0][ax], sg[1][ax]), hi: Math.max(sg[0][ax], sg[1][ax]) });
+          items.push({ sg, li: lp.leg ?? k, rank, free: dist(sg[0], sg[1]) <= (sg.cutShort ? Math.max(stubLen, shortLen) : stubLen), lo: Math.min(sg[0][ax], sg[1][ax]), hi: Math.max(sg[0][ax], sg[1][ax]) });
         })));
+        // chain order: each leg's piece of the wall pass is its last row (either way)
+        for (const w of L.walls || []) {
+          const ax = L.legsAlong[w.leg] === false ? 1 : 0;
+          const vs = w.pts.map((q) => q[ax]);
+          items.push({ sg: [w.pts[0], w.pts[w.pts.length - 1]], wall: w, li: w.leg, rank: 1e6, free: false, lo: Math.min(...vs), hi: Math.max(...vs) });
+        }
         // A leg's rows in places apart from each other (a groove's ends, where
         // it runs into a rabbet at each end of a drawer side) are kept in order
         // within each place, not across them: otherwise every rank goes to one
@@ -2370,12 +2505,28 @@ function sheetPlan(sheet, cfg, joinSkip) {
             mine.forEach((it, i) => { it.li = `${li}.${find(i)}`; });
           }
         }
+        for (const it of items) it.base = it.li;
+        // Chain order: a leg that joins two others (the dado across the bottom of
+        // a C) may hold back its last pass: when its pass count would leave the
+        // bit at the wrong end, the far leg is cut first and the held pass brings
+        // the bit back. The orders below try it both ways.
+        if (L.chainOrder && L.legRects) {
+          const touch = (a, b) => Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > -1e-3 && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > -1e-3;
+          const middle = new Set(L.legRects.map((a, i) => i).filter((i) => L.legRects.filter((b, j) => j !== i && touch(L.legRects[i], b)).length >= 2));
+          for (const base of new Set(items.map((it) => it.base))) {
+            if (!middle.has(+String(base).split('.')[0])) continue;
+            const mine = items.filter((it) => it.base === base && !it.free);
+            const top = Math.max(...mine.map((it) => it.rank));
+            if (mine.some((it) => it.rank < top)) for (const it of mine) if (it.rank === top) it.li = `${base}~t`;
+          }
+        }
         // The rows' order. Nearest-next alone can strand a far leg (a drawer side:
         // one end's rabbet, across to the other, back for the groove, across
         // again), so whole orders are compared too: leg by leg in every order of
         // the legs (each leg's rows still farthest-from-the-walls first), ending
         // near where the finishing starts. Lifting counts extra.
         const LIFT = 2;   // inches of travel a lift-and-plunge is worth
+        const downLink = L.chainOrder ? CHAIN_LINK : 0.5;   // links up to this long are fed at depth
         const ovTol = 0.02;
         const finStarts = L.chains.flatMap((c) => (c.closed ? c.pts : [c.pts[0], c.pts[c.pts.length - 1]]));
         const toFinish = (p) => (finStarts.length ? Math.min(...finStarts.map((q) => dist(p, q))) : 0);
@@ -2389,21 +2540,23 @@ function sheetPlan(sheet, cfg, joinSkip) {
             // (overlap along the leg), not for ones at the far end of the leg: the
             // two ends of a wall-side row the finishing pass cut short go with
             // whichever end the bit is at, not across the part and back
-            const waits = (it) => !it.free && left.some((o) => o !== it && !o.free && o.li === it.li && o.rank < it.rank && Math.min(o.hi, it.hi) - Math.max(o.lo, it.lo) > ovTol);
+            const waits = (it) => !it.free && left.some((o) => o !== it && !o.free && o.base === it.base && o.rank < it.rank && Math.min(o.hi, it.hi) - Math.max(o.lo, it.lo) > ovTol);
             // leg by leg: only the first unfinished leg in legOrder
             const legNow = legOrder ? legOrder.find((li) => left.some((it) => it.li === li)) : null;
             let best = null;
-            left.forEach((it, k) => {
-              if (waits(it) || (legNow != null && it.li !== legNow)) return;
+            const pick = (anyLeg) => left.forEach((it, k) => {
+              if (waits(it) || (!anyLeg && legNow != null && it.li !== legNow)) return;
               it.sg.forEach((e, ei) => {
                 const d = dist(e, here);
-                const sc = d + (first || d > 0.5 ? LIFT : 0);
+                const sc = d + (first || d > downLink ? LIFT : 0);
                 if (!best || sc < best.sc) best = { sc, k, ei };
               });
             });
+            pick(false);
+            if (!best) pick(true);   // (an order that can't be kept: nearest next)
             const it = left.splice(best.k, 1)[0];
             const [a, b] = best.ei === 0 ? it.sg : [it.sg[1], it.sg[0]];
-            seq.push([a, b]);
+            seq.push([a, b, it]);
             cost += best.sc + dist(a, b);
             here = b;
             first = false;
@@ -2422,8 +2575,10 @@ function sheetPlan(sheet, cfg, joinSkip) {
         }
         // nearest-next as it was: kept when it's no worse
         const greedy = greedySeq(start0, null);
-        if (!plan || greedy.cost <= plan.cost + 1e-6) plan = greedy;
-        for (const [a, b] of plan.seq) {
+        // (chain order: legs kept whole unless nearest-next is really better)
+        if (!plan || (L.chainOrder ? greedy.cost < plan.cost - 0.5 : greedy.cost <= plan.cost + 1e-6)) plan = greedy;
+        for (const [a, b, it] of plan.seq) {
+          if (it && it.wall) { runPath(chainPath(it.wall, a, (p) => inOrOn(p, L.allowed, 3e-3)), 'finish'); continue; }
           P.op = 'pocket';
           goTo(a[0], a[1], [b]);
           P.op = 'pocket';
@@ -2485,7 +2640,20 @@ function sheetPlan(sheet, cfg, joinSkip) {
       runGroup(pl, dry, false, ci, st);
       curPart = keep;
       classExit.set(key, [dry.x, dry.y]);
-      classTime.set(key, movesTime(dry.moves, { x: start[0], y: start[1], z: cfg.safeZ }));
+      // each lift inside the pocket after the first entry counts 2 s more than the
+      // estimate gives it (the cutter stays down wherever it safely can: on a near
+      // tie, the start that keeps it down wins)
+      // and a rapid inside it counts twice (on a near tie, the start that keeps
+      // the cutter in the cut wins over one that saves the same travel outside)
+      let lifts = 0, inRap = 0, zPrev = cfg.safeZ, pPrev = start;
+      for (const m of dry.moves) {
+        if (m.z == null) continue;
+        if (m.g === 0 && zPrev < -1e-6 && m.z > zPrev + 1e-6) lifts++;
+        if (m.g === 0 && m.x != null && lifts) inRap += dist(pPrev, [m.x, m.y]);
+        zPrev = m.z;
+        if (m.x != null) pPrev = [m.x, m.y];
+      }
+      classTime.set(key, movesTime(dry.moves, { x: start[0], y: start[1], z: cfg.safeZ }) + (lifts * 2) / 60 + inRap / jogIpm);
     }
     return classExit.get(key);
   };
