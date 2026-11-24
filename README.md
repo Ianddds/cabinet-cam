@@ -220,6 +220,12 @@ Choices are *Along length*, *Across width* and *Any (best fit)*; *Any* lets the 
 
 Parts tagged `cnc: false` (face frame stiles and rails from Cabinet build, or anything you tag that way) are never nested. They appear in a **Cut list** card instead, grouped by material, identical members combined, with lengths in fractions (nearest 1/32) and decimals and the cabinets each line belongs to. **Download CSV** or **Print**.
 
+**Stock needed** sits at the top of the cut list (on screen and printed), above the parts:
+- **Lumber** first: each material's lineal feet per size (width × thickness), rounded up to the next whole foot, with the **Lumber waste** factor already added (default 15%, set next to the heading, remembered on this PC).
+- **Sheet goods** next: how many sheets (the Sheet card's size, grain along its length) and how much of them the parts use. The printed cut list ends with a page per sheet: a map of where each part comes out, labelled with its size. A part bigger than a sheet is named.
+- Each material's **Lumber / Sheet goods** switch is on its line (kept with the job). Until it's set, ply, BB/Baltic, MDF, melamine, particleboard and the like are sheet goods, and so is anything with a part wider than 12"; the rest is lumber.
+- The parts list below follows the same order: lumber materials, then sheet goods.
+
 ## Tabs
 
 Cutting → **Leave tabs on part outlines**. Tabs go on straight runs of the outline, clear of corners. The count is the outline length ÷ spacing, never fewer than **Min per part**, shared out by run length. **Tab thickness** is the material left at the bottom; **Only parts under** limits tabs to small parts (0 = all). On any pass deeper than the tab top the tool lifts over each tab (the lift is tab length + tool diameter, so the tab left is the length you set) and plunges back down. Inside cutouts don't get tabs. Tabs work with or without onion skin.

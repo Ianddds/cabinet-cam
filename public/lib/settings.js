@@ -38,6 +38,8 @@ export const DEFAULT_SETTINGS = {
   // smallBelow / maxPer: smaller parts get more tabs (minTabsFor in toolpath.js)
   overcut: 0.01,
   stayDownMax: 3,
+  // cut list stock: lumber waste factor (%), saw kerf between sheet-goods parts (in)
+  cutList: { waste: 15, kerf: 0.125 },
   dadosFirst: true,  // dados before holes always (one bit: costs a reload of it when a drill bit has holes)
   peckOver: 0.5,     // holes deeper than this (from where the hole starts) are pecked
   peckStep: 0.375,   // ... this deep a stroke (a bit's own Peck, if set, wins)

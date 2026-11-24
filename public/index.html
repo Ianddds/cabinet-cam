@@ -193,6 +193,13 @@
           <button id="cutListPrint">Print</button>
         </div>
         <p class="muted small">Parts not cut on the CNC (face frame stiles and rails, anything tagged cnc: false). Identical members are combined.</p>
+        <div class="cut-stock">
+          <div class="cut-stock-head">
+            <h3>Stock needed</h3>
+            <label title="Added to the lineal feet of lumber (defects, ends, mistakes)">Lumber waste <input type="number" id="clWaste" step="1" min="0" /> %</label>
+          </div>
+          <div id="cutListStock" class="table-wrap"></div>
+        </div>
         <div id="cutListTable" class="table-wrap"></div>
       </section>
 

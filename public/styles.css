@@ -331,3 +331,17 @@ table.cut-list tr.col-head th { background: var(--bg); font-size: 11px; text-tra
 table.cut-list tr.col-head th.num { text-align: right; }
 table.cut-list tr.col-head th.sorted { color: var(--accent); }
 table.cut-list th sup { font-size: 9px; margin-left: 1px; }
+/* cut list stock */
+table.cut-list tr.stock td { background: var(--panel-2, #fbf8ef); font-size: 12px; }
+table.cut-list .stock-k { font-weight: 600; margin-right: 6px; }
+table.cut-list select.cl-kind { margin-left: 10px; font-size: 12px; padding: 1px 4px; font-weight: 400; }
+.cut-stock-opts { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; margin: 0 0 10px; }
+.cut-stock-opts input { width: 70px; margin: 0 4px; }
+.warn-text { color: var(--warn, #b54708); }
+.cut-stock { margin: 0 0 14px; }
+.cut-stock-head { display: flex; align-items: center; gap: 16px; margin: 0 0 6px; }
+.cut-stock-head h3 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; }
+.cut-stock-head label { font-size: 12px; }
+.cut-stock-head input { width: 64px; margin: 0 4px; }
+table.stock-list { width: auto; min-width: min(560px, 100%); }
+table.stock-list select.cl-kind { margin: 0; }

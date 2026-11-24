@@ -22,7 +22,7 @@ import { carve, check as simCheck } from '../public/lib/sim.js';
 import { machineTime } from '../public/lib/machine.js';
 import { DEFAULT_SETTINGS, groupParts, mergeSettings, holdDownOf } from '../public/lib/settings.js';
 import { DEFAULT_LIBRARY, resolveTools } from '../public/lib/tools.js';
-import { cutListRows, cutListCSV, fraction } from '../public/lib/cutlist.js';
+import { cutListRows, cutListCSV, fraction, guessKind, linealStock, sheetStockParts, placedSize } from '../public/lib/cutlist.js';
 import { applyGrain, splitPart, carryOverrides, effectiveGrain } from '../public/lib/grain.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2034,6 +2034,26 @@ function distSeg(p, a, b) {
   // a screw in that island anchors it: no warning
   const wC = sheetToolpaths({ ...sheetB, screws: [...corners, { x: 28, y: 24 }] }, cfg).warnings.filter((w) => /no chain of tabs/.test(w));
   check(wC.length === 0, 'tabs: a screw in the island holds the part, no warning');
+}
+
+// cut list stock: lumber in lineal feet per size (+ waste), sheet goods in sheets
+{
+  const rows = [
+    { material: 'BB 3/4', part: 'Fixed shelf', qty: 2, length: 96, width: 23.25, thickness: 0.71, grain: 'length' },
+    { material: 'BB 3/4', part: 'Fixed shelf', qty: 2, length: 96, width: 19.5, thickness: 0.705, grain: 'length' },
+    { material: 'BB 3/4', part: 'Fixed shelf', qty: 2, length: 48, width: 23.25, thickness: 0.71, grain: 'length' },
+    { material: 'BB 3/4', part: 'Fixed shelf', qty: 2, length: 19.5, width: 9, thickness: 0.705, grain: 'length' },
+    { material: 'Poplar', part: 'Stile', qty: 2, length: 95.045, width: 1.5, thickness: 0.75 },
+    { material: 'Poplar', part: 'Rail', qty: 4, length: 36, width: 1.5, thickness: 0.75 },
+    { material: 'Poplar', part: 'Shelf nose', qty: 4, length: 144, width: 3.5, thickness: 0.795 },
+  ];
+  check(guessKind('BB 3/4', rows.slice(0, 4)) === 'sheet' && guessKind('Poplar', rows.slice(4)) === 'lumber', 'cut list: BB is sheet goods, poplar is lumber');
+  const lf = linealStock(rows.slice(4), 15);
+  const s15 = lf.find((z) => z.width === 1.5);
+  check(Math.abs(s15.feet - (95.045 * 2 + 36 * 4) / 12) < 1e-9 && Math.abs(s15.withWaste - s15.feet * 1.15) < 1e-9 && lf.length === 2, `cut list: lineal feet per size with 15% waste (${lf.map((z) => `${z.width}: ${z.withWaste.toFixed(1)}`).join(', ')})`);
+  const n = nestParts(sheetStockParts(rows.slice(0, 4)), { sheetW: 96, sheetH: 48, trim: 0, endTrim: 0, spacing: 0.125, respectGrain: true, searchMs: 100 });
+  const inside = n.sheets.every((sh) => sh.placements.every((pl) => { const z = placedSize(pl); return pl.x >= -1e-6 && pl.y >= -1e-6 && pl.x + z.w <= 96 + 1e-6 && pl.y + z.h <= 48 + 1e-6; }));
+  check(n.sheets.length === 3 && !n.unplaced.length && inside, `cut list: the BB shelves need 3 sheets of 96 x 48 (${n.sheets.length})`);
 }
 
 console.log(`\npocket lifts after first entry: ${liftTotal} across ${pocketTotal} pockets`);
