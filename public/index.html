@@ -166,6 +166,7 @@
             <label class="field" title="Room from the edge of the head to the nearest cut">Clearance<input type="number" step="0.0625" data-path="screws.clear" /></label>
             <label class="field" title="How deep the first bit drills the screw holes; 0 = right through the sheet">Hole depth<input type="number" step="0.05" data-path="screws.depth" /></label>
             <label class="check span3" title="Each sheet gets two files: ..._screws drills the screw holes with the sheet's first bit and parks; drive the screws, then run the sheet's own file, which starts cutting straight away (no stop). Off: one file that drills, stops for the screws and carries on."><input type="checkbox" data-path="screws.separate" /> Screw holes in their own file (run it first)</label>
+            <label class="check span3" title="On: besides the five, a screw within 12&quot; of each end of every dado or rabbet across a part (top, bottom, shelf dados), and if there's room one every 36&quot; along the long ones (backs, drawer bottoms), so the ply lies flat where they're cut. Screws go in the waste only; parts slide over by a screw's width where that's what makes room. An end with no room is marked on the sheet."><input type="checkbox" data-path="screws.dados" /> More screws by dados and rabbets</label>
           </div>
         </div>
         <div id="tabOpts" class="grid2">

@@ -195,11 +195,10 @@ const THIN = 0.2;   // room to spare around a spot below this: a thin strip
 // keeper only when there's no scrap within this distance of where it wants to be
 const KEEPER_COST = 30;
 const screwSide = (ctx) => 2 * ctx.screws.R + ctx.spacing;
-function placeScrews(bin, rects, ctx) {
-  const S = ctx.screws;
-  const none = { spots: [], missing: 0, thin: 0, inKeeper: 0, dist: 0, centre: 0 };
-  if (!S || !rects.length) return none;
-  const R = S.R, sw = screwSide(ctx), sp = ctx.spacing, e = 1e-6;
+// The free space a screw can go in: a copy of the bin's free rectangles, less
+// the lines that cut a keeper free (and less any screws already placed).
+function screwWork(bin, ctx, spots = []) {
+  const sp = ctx.spacing, e = 1e-6, sw = screwSide(ctx), R = ctx.screws.R;
   const work = new MaxRectsBin(bin.w, bin.h);
   work.free = bin.free.map((f) => ({ ...f }));
   const keepers = freeKeepers(bin, { remnantMin: ctx.remnantMin, spacing: sp });
@@ -217,6 +216,15 @@ function placeScrews(bin, rects, ctx) {
     for (const o of kp.rects) if (o !== k) left = rectsMinus(left, o);
     for (const b of left) if (b.w > e && b.h > e) work.place(b);
   }
+  for (const q of spots) work.place({ x: q.x - R, y: q.y - R, w: sw, h: sw });
+  return { work, keepers };
+}
+function placeScrews(bin, rects, ctx) {
+  const S = ctx.screws;
+  const none = { spots: [], missing: 0, thin: 0, inKeeper: 0, dist: 0, centre: 0 };
+  if (!S || !rects.length) return none;
+  const R = S.R, sw = screwSide(ctx), sp = ctx.spacing, e = 1e-6;
+  const { work, keepers } = screwWork(bin, ctx);
   // the area the parts take up (rects carry the spacing on their far side)
   let ux0 = Infinity, uy0 = Infinity, ux1 = -Infinity, uy1 = -Infinity;
   for (const r of rects) { ux0 = Math.min(ux0, r.x); uy0 = Math.min(uy0, r.y); ux1 = Math.max(ux1, r.x + r.w - sp); uy1 = Math.max(uy1, r.y + r.h - sp); }
@@ -249,6 +257,170 @@ function placeScrews(bin, rects, ctx) {
     out.spots.push({ x: best.x + R, y: best.y + R });
   }
   return out;
+}
+
+// More screws by dados and rabbets (opts.screws.dados): the ply has to lie flat
+// where they're cut, since their depth is measured from the top.
+//  - a dado or rabbet across a part (top, bottom, shelf dados in a side): a
+//    screw within DADO_END_REACH of each end. These matter: the sheet warns
+//    when one can't be had.
+//  - one along a part (a back rabbet, a drawer bottom groove) can float a
+//    little: only when it runs longer than LONG_SPAN, a screw within LONG_REACH
+//    of every point, so no span over LONG_SPAN goes unheld - if there's room.
+// Screws go in the waste only (never through a part), one at a time where they
+// cover the most still uncovered (an end across counts ten times a point
+// along). An end still uncovered then gets room made the way it's done by hand:
+// a part near it slides over by one screw square (pushing at most two others
+// along), the move that covers most for the least sliding, kept only if it
+// covers more. Shared cut lines it breaks are expected.
+export const DADO_END_REACH = 12;
+export const LONG_SPAN = 36;
+const LONG_REACH = LONG_SPAN / 2;
+const DADO_SCREWS_MAX = 12;   // extra screws per sheet, at most
+// what has to be near a screw, for the parts as they sit (bin coordinates)
+// flip: the layout gets mirrored afterwards (finish: the biggest offcut to the
+// zero corner) by moving each part, not turning it over, while the screws are
+// mirrored point for point; so in the bin's frame a part's dados are mirrored
+// within the part
+function dadoNeeds(items, flip = {}) {
+  const out = [];
+  for (const { it, r } of items) {
+    if (!it.part || r.xf) continue;
+    const x0 = r.x + (r.rotated ? it.py : it.px), y0 = r.y + (r.rotated ? it.px : it.py);
+    const w = r.rotated ? it.part.height : it.part.width, h = r.rotated ? it.part.width : it.part.height;
+    for (const q of dadoScrewNeeds([{ part: it.part, x: x0, y: y0, rotated: r.rotated }])) {
+      out.push({ ...q, p: [flip.mx ? 2 * x0 + w - q.p[0] : q.p[0], flip.my ? 2 * y0 + h - q.p[1] : q.p[1]] });
+    }
+  }
+  return out;
+}
+// which way finish mirrors a bin (the biggest offcut to the stock's zero corner)
+function mirrorOf(bin, opts) {
+  const e = 1e-6, sp = opts.spacing;
+  const k0 = freeKeepers(bin, opts)[0]?.rects[0];
+  return { mx: !!k0 && k0.x > e && k0.x + k0.w + sp >= bin.w - e, my: !!k0 && k0.y > e && k0.y + k0.h + sp >= bin.h - e };
+}
+// The same for a finished sheet's placements (sheet coordinates): what has to
+// have a screw near it. Exported for the sheet view and the tests.
+export function dadoScrewNeeds(placements) {
+  const need = [];
+  for (const pl of placements) {
+    if (!pl.part?.pockets?.length || pl.xf) continue;
+    const it = { part: pl.part };
+    const g = placedGeometry(pl);
+    const B = g.box, pw = B.x1 - B.x0, ph = B.y1 - B.y0;
+    const longX = pw >= ph, squareish = Math.max(pw, ph) / Math.max(1e-6, Math.min(pw, ph)) < 1.3;
+    // each dado's run: its walls from the cut records, else its outline when it's long and narrow
+    const runs = [];
+    for (const q of g.pockets) {
+      if (q.walls?.length) { for (const wl of q.walls) runs.push(wl.seg); continue; }
+      const pts = q.loops.flat();
+      const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+      const lx = x1 - x0, ly = y1 - y0;
+      if (Math.max(lx, ly) < 4 || Math.max(lx, ly) < 2.5 * Math.min(lx, ly)) continue;   // a cup or a slot, not a dado
+      runs.push(lx >= ly ? [[x0, (y0 + y1) / 2], [x1, (y0 + y1) / 2]] : [[(x0 + x1) / 2, y0], [(x0 + x1) / 2, y1]]);
+    }
+    for (const [a, b] of runs) {
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (L < 4) continue;
+      const alongX = Math.abs(b[0] - a[0]) >= Math.abs(b[1] - a[1]);
+      if (squareish || alongX !== longX) {
+        need.push({ p: a, reach: DADO_END_REACH, w: 10, must: true, part: it.part.name });
+        need.push({ p: b, reach: DADO_END_REACH, w: 10, must: true, part: it.part.name });
+      } else if (L > LONG_SPAN) {
+        const n = Math.ceil(L / 2);
+        for (let i = 0; i <= n; i++) need.push({ p: [a[0] + ((b[0] - a[0]) * i) / n, a[1] + ((b[1] - a[1]) * i) / n], reach: LONG_REACH, w: 1, must: false, part: it.part.name });
+      }
+    }
+  }
+  return need;
+}
+function dadoScrews(b, ctx, flip = {}) {
+  const R = ctx.screws.R, sw = screwSide(ctx);
+  const spots = (b.screws?.spots || []).map((q) => ({ ...q }));
+  const blocks = b.rem?.blocks || [];
+  const covered = (q, list) => list.some((s) => Math.hypot(s.x - q.p[0], s.y - q.p[1]) <= q.reach);
+  // add screws to `list` where they cover most of `need`; returns how many were added
+  const greedy = (bin, need, list, cap) => {
+    const { work, keepers } = screwWork(bin, ctx, list);
+    const inKeeper = (x, y) => keepers.some((kp) => kp.rects.some((k) => x < k.x + k.w && x + sw > k.x && y < k.y + k.h && y + sw > k.y));
+    let added = 0;
+    for (; added < cap; added++) {
+      const open = need.filter((q) => !covered(q, list));
+      if (!open.length) break;
+      let best = null;
+      for (const f of work.free) {
+        if (f.w < sw - 1e-9 || f.h < sw - 1e-9) continue;
+        for (const q of open) {
+          // the spot in this free rectangle nearest that need
+          const x = Math.min(f.x + f.w - sw, Math.max(f.x, q.p[0] - R)), y = Math.min(f.y + f.h - sw, Math.max(f.y, q.p[1] - R));
+          const c = [x + R, y + R];
+          if (Math.hypot(c[0] - q.p[0], c[1] - q.p[1]) > q.reach) continue;
+          let score = 0;
+          for (const o of open) if (Math.hypot(c[0] - o.p[0], c[1] - o.p[1]) <= o.reach) score += o.w;
+          if (inKeeper(x, y)) score *= 0.3;   // the offcut being kept only when nothing else will do
+          const d = Math.hypot(c[0] - q.p[0], c[1] - q.p[1]);
+          if (!best || score > best.score + 1e-9 || (Math.abs(score - best.score) < 1e-9 && d < best.d)) best = { x, y, c, score, d };
+        }
+      }
+      if (!best || best.score <= 0) break;
+      work.place({ x: best.x, y: best.y, w: sw, h: sw });
+      list.push({ x: best.c[0], y: best.c[1], dado: true });
+    }
+    return added;
+  };
+  let items = b.items, bin = b.bin;
+  let need = dadoNeeds(items, flip);
+  if (!need.length) return null;
+  let extra = greedy(bin, need, spots, DADO_SCREWS_MAX);
+  // ends across still bare: slide a part over to make room
+  let slid = 0;
+  const ov = (a, c) => a.x < c.x + c.w - 1e-9 && c.x < a.x + a.w - 1e-9 && a.y < c.y + c.h - 1e-9 && c.y < a.y + a.h - 1e-9;
+  for (let round = 0; round < 6 && extra < DADO_SCREWS_MAX; round++) {
+    const bare = need.filter((q) => q.must && !covered(q, spots));
+    if (!bare.length) break;
+    const fixed = [...blocks, ...spots.map((q) => ({ x: q.x - R, y: q.y - R, w: sw, h: sw }))];
+    let best = null;
+    for (const q of bare) {
+      for (let i = 0; i < items.length; i++) {
+        const r0 = items[i].r;
+        const gap = Math.max(r0.x - q.p[0], 0, q.p[0] - (r0.x + r0.w), r0.y - q.p[1], q.p[1] - (r0.y + r0.h));
+        if (gap > q.reach) continue;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          for (const d of [sw, 2 * sw]) {
+            // chain: anything the moved part runs into moves too (at most two more)
+            const moving = new Set([i]);
+            let ok = true, grew = true;
+            while (ok && grew) {
+              grew = false;
+              for (const k of [...moving]) {
+                const r = items[k].r, m = { ...r, x: r.x + dx * d, y: r.y + dy * d };
+                if (m.x < -1e-9 || m.y < -1e-9 || m.x + m.w > bin.w + 1e-9 || m.y + m.h > bin.h + 1e-9 || fixed.some((f) => ov(m, f))) { ok = false; break; }
+                for (let j = 0; j < items.length; j++) if (!moving.has(j) && ov(m, items[j].r)) { moving.add(j); grew = true; }
+              }
+              if (moving.size > 3) ok = false;
+            }
+            if (!ok) continue;
+            const trial = items.map((x, k) => (moving.has(k) ? { it: x.it, r: { ...x.r, x: x.r.x + dx * d, y: x.r.y + dy * d } } : x));
+            const tBin = rebuildBin(bin, trial, blocks);
+            const tNeed = dadoNeeds(trial, flip), tSpots = spots.map((p) => ({ ...p }));
+            greedy(tBin, tNeed.filter((n) => n.must), tSpots, 1);
+            const bareAfter = tNeed.filter((n) => n.must && !covered(n, tSpots)).length;
+            const cost = bareAfter * 1000 + moving.size * 10 + d;
+            if (bareAfter < bare.length && (!best || cost < best.cost)) best = { cost, trial, tBin, moving };
+          }
+        }
+      }
+      if (best) break;   // one end at a time: take the best move for the first end that has one
+    }
+    if (!best) break;
+    items = best.trial; bin = best.tBin; slid += best.moving.size;
+    need = dadoNeeds(items, flip);
+    extra += greedy(bin, need, spots, DADO_SCREWS_MAX - extra);
+  }
+  const bare = need.filter((q) => q.must && !covered(q, spots));
+  return { items, bin, spots, extra, slid, bareParts: [...new Set(bare.map((q) => q.part))] };
 }
 
 // Open the corners of the parts' area for corner screws: where parts cover a
@@ -546,7 +718,7 @@ const endTrimOf = (opts) => (Number.isFinite(opts.endTrim) && opts.endTrim >= 0 
 
 export function nestKey(parts, opts) {
   const items = makeItems(parts, opts).map((it) => `${it.key}:${it.w.toFixed(4)}x${it.h.toFixed(4)}:${it.o.normal ? 1 : 0}${it.o.rotated ? 1 : 0}`);
-  const s = [opts.sheetW, opts.sheetH, opts.trim, endTrimOf(opts) === opts.trim ? '' : `e${endTrimOf(opts)}`, opts.spacing, opts.commonLine ? 'cl' : '', opts.screws?.R > 0 ? `sc5-${opts.screws.R}` : '', items.sort().join(',')].join('|');
+  const s = [opts.sheetW, opts.sheetH, opts.trim, endTrimOf(opts) === opts.trim ? '' : `e${endTrimOf(opts)}`, opts.spacing, opts.commonLine ? 'cl' : '', opts.screws?.R > 0 ? `sc5-${opts.screws.R}${opts.screws.dados ? 'd' : ''}` : '', items.sort().join(',')].join('|');
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
   return h.toString(36) + '-' + items.length;
@@ -640,7 +812,17 @@ function freeKeepers(bin, opts) {
 }
 
 function finish(res, opts) {
-  const sheets = res.bins.map((b) => {
+  const sheets = res.bins.map((b0) => {
+    // more screws by dados and rabbets (parts may slide over to make room)
+    let b = b0, dado = null;
+    if (opts.screws?.R > 0 && opts.screws.dados && b0.screws) {
+      const ctx = { screws: opts.screws, spacing: opts.spacing, remnantMin: opts.remnantMin };
+      const flip = mirrorOf(b0.bin, opts);
+      dado = dadoScrews(b0, ctx, flip);
+      // sliding parts can change the biggest offcut and so the mirroring: once more with that
+      if (dado) { const f2 = mirrorOf(dado.bin, opts); if (f2.mx !== flip.mx || f2.my !== flip.my) dado = dadoScrews(b0, ctx, f2) || dado; }
+      if (dado) b = { ...b0, items: dado.items, bin: dado.bin, screws: { ...b0.screws, spots: dado.spots } };
+    }
     // tx: trim at the ends (x), trim: along the long edges (y)
     const trim = b.rem ? b.rem.trim : opts.trim;
     const tx = b.rem ? b.rem.trim : endTrimOf(opts);
@@ -684,6 +866,7 @@ function finish(res, opts) {
       screwsMissing: b.screws?.missing || 0,
       screwsThin: b.screws?.thin || 0,
       screwsInKeeper: b.screws?.inKeeper || 0,
+      ...(dado ? { screwsByDados: dado.extra, screwsSlid: dado.slid, screwsDadoBare: dado.bareParts } : {}),
       remnant: b.rem ? { id: b.rem.id, w: b.rem.w, h: b.rem.h, ...(b.rem.rects?.length > 1 ? { rects: b.rem.rects } : {}) } : null,
       placements,
       yield: placements.reduce((a, pl) => a + pl.part.width * pl.part.height, 0) / (w * h),

@@ -14,7 +14,7 @@ import { inRegion, difference, offset, union, area, intersect } from '../public/
 import { SHAPE_ORDERS, placeShapes, isShapePart } from '../public/lib/shapes.js';
 import { normalizeAll } from '../lib/parts.js';
 import { decode } from '../lib/onshape.js';
-import { nestParts, placedGeometry, applySolution, nestKey } from '../public/lib/nest.js';
+import { nestParts, placedGeometry, applySolution, nestKey, dadoScrewNeeds } from '../public/lib/nest.js';
 import { sheetTabs, minTabsFor, sheetToolpaths, fillHoleBites, placeTabs, legsOf, splitLobes, legsFromWalls, offcutCutLines, screwR, screwCheck } from '../public/lib/toolpath.js';
 import { postGcode, postShopBot, post as postAny, fitArcs } from '../public/lib/post.js';
 import { parsePP } from '../public/lib/vpp.js';
@@ -2076,6 +2076,38 @@ function distSeg(p, a, b) {
   const tabs = sheetTabs(sheet, { ...s0, ...tl, tool: bit, thickness: 0.73 }).tabs;
   const onLine = (x) => tabs.some((t) => Math.abs(t.y - 23.8) < 0.01 && t.x > 19.44 && t.x < 35.45 && Math.abs(t.x - x) <= 2);
   check(onLine(19.44) && onLine(35.45), `tabs: a shared tab near each end of the line two parts share, not an inch off it (${tabs.filter((t) => Math.abs(t.y - 23.8) < 0.01).map((t) => t.x.toFixed(2)).join(', ')})`);
+}
+
+// more screws by dados and rabbets: a screw within 12" of each end of every dado
+// across a part (sliding parts over to make room), in the waste only
+{
+  const many = normalizeAll(sampleKitchen()).parts.filter((p) => p.include && p.cnc !== false);
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  s0.screws = { ...s0.screws, on: true }; s0.holdDown = 'tabs';
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const R = screwR(s0.screws);
+  const bareEnds = (sh) => dadoScrewNeeds(sh.placements).filter((q) => q.must && !sh.screws.some((c) => Math.hypot(c.x - q.p[0], c.y - q.p[1]) <= q.reach)).length;
+  const run = (dados) => {
+    let ends = 0, bare = 0, overlaps = 0, screwHits = 0, reported = 0;
+    for (const g of groupParts(many)) for (const sh of nestParts(g.parts, { ...s0.sheet, spacing: tl.tool.dia, commonLine: true, respectGrain: true, searchMs: 1500, screws: { R, dados } }).sheets) {
+      ends += dadoScrewNeeds(sh.placements).filter((q) => q.must).length;
+      bare += bareEnds(sh);
+      reported += (sh.screwsDadoBare || []).length;
+      const bx = sh.placements.map((pl) => placedGeometry(pl).box);
+      for (let a = 0; a < bx.length; a++) for (let b = a + 1; b < bx.length; b++) if (bx[a].x0 < bx[b].x1 - 1e-6 && bx[b].x0 < bx[a].x1 - 1e-6 && bx[a].y0 < bx[b].y1 - 1e-6 && bx[b].y0 < bx[a].y1 - 1e-6) overlaps++;
+      if (dados) screwHits += screwCheck(sh, sheetToolpaths(sh, { ...s0, ...tl, thickness: g.thickness }).moves, { ...s0, ...tl }).filter((x) => !x.ok).length;
+    }
+    return { ends, bare, overlaps, screwHits, reported };
+  };
+  const off = run(false), on = run(true);
+  check(on.bare < off.bare && on.bare <= 1, `screws by dados: dado ends across a part with no screw within 12" ${off.bare} of ${off.ends} without, ${on.bare} of ${on.ends} with`);
+  check(on.overlaps === 0 && on.screwHits === 0, `screws by dados: parts slid without overlapping (${on.overlaps}), no cut inside a screw's clearance (${on.screwHits})`);
+  check((on.bare === 0) === (on.reported === 0), `screws by dados: an end left without a screw is reported (${on.bare} found, ${on.reported} parts reported)`);
+  // a dado running across a side: both its ends need a screw near them
+  const rect = (w, h) => [[0, 0], [w, 0], [w, h], [0, h]];
+  const side = { id: 'S', name: 'BOXED SIDE', include: true, qty: 1, grain: 'length', thickness: 0.75, width: 34.5, height: 23.25, outline: rect(34.5, 23.25), holes: [], pockets: [{ loops: [[[0.5, 0], [1.25, 0], [1.25, 23.25], [0.5, 23.25]]], depth: 0.25 }], material: 'T' };
+  const needs = dadoScrewNeeds([{ part: side, x: 10, y: 10, rotated: false }]);
+  check(needs.filter((q) => q.must).length === 2, `screws by dados: a dado across a side has 2 ends that need a screw (${needs.filter((q) => q.must).length})`);
 }
 
 // min stepdown (compression bits): a routed first pass shallower than it is

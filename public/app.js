@@ -1,6 +1,6 @@
 import { DEFAULT_SETTINGS, groupParts, mergeSettings, holdDownOf, usesSkin, usesTabs } from './lib/settings.js';
 import { carve, check, shade } from './lib/sim.js';
-import { nestParts, applySolution, nestKey, placedGeometry, partExits, rectMinus, compareKeep } from './lib/nest.js';
+import { nestParts, applySolution, nestKey, placedGeometry, partExits, rectMinus, compareKeep, dadoScrewNeeds } from './lib/nest.js';
 import { placeShapes, isShapePart, labelPoint, SHAPE_ORDERS } from './lib/shapes.js';
 import { sheetToolpaths, sheetTabs, minTabsFor, screwR, rectsOutline, screwCheck, offcutCutLines, tabOnPaths } from './lib/toolpath.js';
 import { post, postWithWarnings, fileExtension, SBP_MAX_TOOL, toolNumberOk } from './lib/post.js';
@@ -749,7 +749,7 @@ function nestGroups() {
   // shared cut lines: parts sit exactly the profile bit apart, so facing edges are one cut
   if (s.commonLine) { base.spacing = resolveTools(s, library, job.toolSnapshot || []).tool.dia; base.commonLine = true; }
   // screw hold-downs: one near each corner of the parts' area and one at its centre
-  if (s.screws?.on) base.screws = { R: screwR(s.screws) };
+  if (s.screws?.on) base.screws = { R: screwR(s.screws), dados: s.screws.dados !== false };
   return groupParts(applyGrain(runParts().filter((p) => p.include && p.qty > 0))).map((g) => {
     const key = nestKey(g.parts, base) + `|rt${base.remnantTrim}`;
     const kept = job.nests?.[key];
@@ -1101,6 +1101,7 @@ async function runNestNow(run) {
       const what = sheet.remnant ? `remnant R${rno ?? '?'}` : `sheet ${i + 1} of ${nest.sheets.length}`;
       const title = `${job.name || 'Job'} | ${g.key} | ${what}`;
       if (s.screws?.on && !sheet.screwsManual && sheet.screwsMissing) stockNotes.push(`${g.key} ${what}: room for only ${sheet.screws.length} of 5 hold-down screws — hold the rest of the sheet another way`);
+      { const bare = dadoBare(s, sheet); if (bare.length) stockNotes.push(`${g.key} ${what}: no screw within 12" of the end of a dado or rabbet across ${bare.join(', ')} — no room in the waste there (marked on the sheet); add one by hand if it matters`); }
       if (s.screws?.on && !sheet.screwsManual && sheet.screwsInKeeper) stockNotes.push(`${g.key} ${what}: ${sheet.screwsInKeeper} hold-down screw${sheet.screwsInKeeper === 1 ? '' : 's'} had to go in the offcut being kept (no scrap in that part of the sheet) — it will have the hole${sheet.screwsInKeeper === 1 ? '' : 's'}`);
       // sheet numbers padded (S01 … S10 sort right everywhere); see nameFiles for the screw-file pair
       const nw = Math.max(2, String(nest.sheets.length).length);
@@ -1141,6 +1142,14 @@ function strHash(t) {
 }
 const manualKey = (key, kept) => `${key}|${kept ? strHash(JSON.stringify(kept.solution)) : 'quick'}`;
 const screwsShown = (cfg, sheet) => !!(cfg.screws?.on || sheet.screwsManual);
+// dado / rabbet ends across a part with no screw within reach, from the sheet's
+// screws as they are now (hand-placed ones count)
+function dadoNeedsBare(sheet) {
+  const sc = sheet.screws || [];
+  try { return dadoScrewNeeds(sheet.placements || []).filter((q) => q.must && !sc.some((c) => Math.hypot(c.x - q.p[0], c.y - q.p[1]) <= q.reach)); }
+  catch { return []; }
+}
+const dadoBare = (s, sheet) => ((s.screws?.on || sheet.screwsManual) && s.screws?.dados !== false ? [...new Set(dadoNeedsBare(sheet).map((q) => q.part))] : []);
 
 function applyManualScrews(sheet, list) {
   if (!sheet.autoScrews) sheet.autoScrews = { screws: sheet.screws || [], missing: sheet.screwsMissing || 0, inKeeper: sheet.screwsInKeeper || 0 };
@@ -1450,6 +1459,10 @@ function renderSheet(item) {
     const tip = c && !c.ok ? `Bad spot: ${c.why}` : `Hold-down screw${sh.screwsManual ? ' (placed by hand)' : ''}${c?.inKeeper ? ', in the offcut being kept' : ''} — drilled first, then the machine stops`;
     svg += `<g class="screw${c && !c.ok ? ' bad' : ''}" data-k="${k}" transform="translate(${q.x.toFixed(3)} ${fy(q.y).toFixed(3)})"><circle class="screwzone" r="${screwR(item.cfg.screws).toFixed(3)}"><title>${tip}${screwEdit ? ' · drag to move, right-click to remove' : ''}</title></circle><circle class="screwpt" r="0.1"/>${screwEdit ? '<circle class="screwhit" r="1.2"/>' : ''}</g>`;
   });
+  // ends of dados across a part with no screw near them (More screws by dados and rabbets)
+  if (screwsShown(item.cfg, sh) && item.cfg.screws?.dados !== false) for (const q of dadoNeedsBare(sh)) {
+    svg += `<g class="dadobare" transform="translate(${q.p[0].toFixed(3)} ${fy(q.p[1]).toFixed(3)})"><circle r="0.6" fill="none" stroke="#e0a800" stroke-width="0.18"/><circle r="0.15" fill="#e0a800"/><title>${esc(q.part)}: end of a dado or rabbet across the part, no screw within ${q.reach}" — the ply may lift here</title></g>`;
+  }
   // offcuts worth keeping (on the zero corner where possible); numbered once the job is marked cut
   (sh.offcuts || []).forEach((oc, k) => {
     const no = job.cut?.added?.find((a) => a.sheetFile === item.file && a.k === k)?.no;
