@@ -285,43 +285,55 @@ $('#groupsToggle').onclick = () => {
   renderParts();
 };
 
-// Cut list sort: click a heading to sort by it (again to reverse). Rows stay
-// grouped by material; the sort is within each material. Remembered on this PC,
-// and the printed cut list uses the same order.
+// Cut list sort: the first heading clicked is the master sort; each heading
+// clicked after it sorts within the one before (Cabinets, then Part, then
+// Length...). Clicking a heading already in the sort reverses it; Clear sort
+// starts over. Rows stay grouped by material, each material with its own
+// headings. Remembered on this PC; Print uses the same order.
 const CUT_SORT_KEY = 'cabinetcam.cutlistSort';
-let cutSort = (() => { try { return JSON.parse(localStorage.getItem(CUT_SORT_KEY)) || null; } catch { return null; } })();
+let cutSort = (() => {
+  try {
+    const v = JSON.parse(localStorage.getItem(CUT_SORT_KEY));
+    return Array.isArray(v) ? v : v?.key ? [v] : [];   // older single-column sort
+  } catch { return []; }
+})();
 const CUT_COLS = [
-  ['qty', 'Qty', true], ['part', 'Part', false], ['length', 'Length', true], ['width', 'Width', true],
-  ['thickness', 'Thk', true], ['cabinets', 'Cabinets', false], ['decimal', 'Decimal', false],
+  ['cabinets', 'Cabinets', false], ['part', 'Part', false], ['qty', 'Qty', true], ['length', 'Length', true],
+  ['width', 'Width', true], ['thickness', 'Thk', true], ['decimal', 'Decimal', false],
 ];
 function sortCutRows(rows) {
-  if (!cutSort) return rows;
-  const k = cutSort.key === 'decimal' ? 'length' : cutSort.key;
-  const dir = cutSort.dir === 'desc' ? -1 : 1;
-  const cmp = (a, b) => (typeof a[k] === 'number' ? a[k] - b[k] : String(a[k] ?? '').localeCompare(String(b[k] ?? ''), undefined, { numeric: true }));
-  return rows.map((r, i) => [r, i]).sort(([a, i], [b, j]) => a.material.localeCompare(b.material) || dir * cmp(a, b) || i - j).map(([r]) => r);
+  const keys = cutSort.map((c) => ({ k: c.key === 'decimal' ? 'length' : c.key, dir: c.dir === 'desc' ? -1 : 1 }));
+  const cmp1 = (a, b, k) => (typeof a[k] === 'number' ? a[k] - b[k] : String(a[k] ?? '').localeCompare(String(b[k] ?? ''), undefined, { numeric: true }));
+  return rows.map((r, i) => [r, i]).sort(([a, i], [b, j]) => {
+    const m = a.material.localeCompare(b.material);
+    if (m) return m;
+    for (const { k, dir } of keys) { const c = dir * cmp1(a, b, k); if (c) return c; }
+    return i - j;
+  }).map(([r]) => r);
 }
 
 function cutListHtml(rows, sortable = false) {
   rows = sortCutRows(rows);
+  // headings aligned like their columns (numbers right), lines between columns;
+  // the sort's order number shows next to its arrow when there's more than one
+  const head = CUT_COLS.map(([key, label, num]) => {
+    const i = cutSort.findIndex((c) => c.key === key);
+    const mark = i < 0 ? '' : ` ${cutSort[i].dir === 'desc' ? '▼' : '▲'}${cutSort.length > 1 ? `<sup>${i + 1}</sup>` : ''}`;
+    const cls = [num ? 'num' : '', sortable ? 'sortable' : '', i >= 0 ? 'sorted' : ''].filter(Boolean).join(' ');
+    const tip = i >= 0 ? 'click to reverse' : cutSort.length ? `sort by ${label.toLowerCase()} within the sort so far` : `sort by ${label.toLowerCase()}`;
+    return `<th${cls ? ` class="${cls}"` : ''}${sortable ? ` data-sort="${key}" title="${tip}"` : ''}>${label}${mark}</th>`;
+  }).join('');
   let html = '', mat = null;
   for (const r of rows) {
     if (r.material !== mat) {
       mat = r.material;
       const n = rows.filter((x) => x.material === mat).reduce((a, x) => a + x.qty, 0);
-      html += `<tr class="group"><td colspan="7">${esc(mat)} — ${n} pcs</td></tr>`;
+      html += `<tr class="group"><td colspan="7">${esc(mat)} — ${n} pcs</td></tr><tr class="col-head">${head}</tr>`;
     }
-    html += `<tr><td class="num">${r.qty}</td><td>${esc(r.part)}</td><td class="num">${fraction(r.length)}</td><td class="num">${fraction(r.width)}</td>
-      <td class="num">${fraction(r.thickness)}</td><td>${esc(r.cabinets)}</td><td class="muted small">${f3(r.length)} × ${f3(r.width)} × ${f3(r.thickness)}</td></tr>`;
+    html += `<tr><td>${esc(r.cabinets)}</td><td>${esc(r.part)}</td><td class="num">${r.qty}</td><td class="num">${fraction(r.length)}</td><td class="num">${fraction(r.width)}</td>
+      <td class="num">${fraction(r.thickness)}</td><td class="muted small">${f3(r.length)} × ${f3(r.width)} × ${f3(r.thickness)}</td></tr>`;
   }
-  // headings aligned like their columns (numbers right), lines between columns
-  const head = CUT_COLS.map(([key, label, num]) => {
-    const on = cutSort?.key === key;
-    const arrow = on ? (cutSort.dir === 'desc' ? ' ▼' : ' ▲') : '';
-    const cls = [num ? 'num' : '', sortable ? 'sortable' : '', on ? 'sorted' : ''].filter(Boolean).join(' ');
-    return `<th${cls ? ` class="${cls}"` : ''}${sortable ? ` data-sort="${key}" title="Sort by ${label.toLowerCase()} (click again to reverse)"` : ''}>${label}${arrow}</th>`;
-  }).join('');
-  return `<table class="cut-list"><thead><tr>${head}</tr></thead><tbody>${html}</tbody></table>`;
+  return `<table class="cut-list"><tbody>${html}</tbody></table>`;
 }
 
 function renderCutList() {
@@ -336,12 +348,21 @@ $('#cutListTable').addEventListener('click', (e) => {
   const th = e.target.closest('th[data-sort]');
   if (!th) return;
   const key = th.dataset.sort;
-  // first click: numbers biggest first, text A to Z; again reverses
+  // a new heading sorts within the ones before it (numbers biggest first, text
+  // A to Z); one already in the sort reverses
   const num = CUT_COLS.find((c) => c[0] === key)?.[2];
-  cutSort = cutSort?.key === key ? { key, dir: cutSort.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: num ? 'desc' : 'asc' };
-  try { localStorage.setItem(CUT_SORT_KEY, JSON.stringify(cutSort)); } catch { /* not kept */ }
-  renderCutList();
+  const have = cutSort.find((c) => c.key === key);
+  if (have) have.dir = have.dir === 'asc' ? 'desc' : 'asc';
+  else cutSort.push({ key, dir: num ? 'desc' : 'asc' });
+  saveCutSort();
 });
+function saveCutSort() {
+  try { localStorage.setItem(CUT_SORT_KEY, JSON.stringify(cutSort)); } catch { /* not kept */ }
+  $('#cutListClearSort').hidden = !cutSort.length;
+  renderCutList();
+}
+$('#cutListClearSort').onclick = () => { cutSort = []; saveCutSort(); };
+$('#cutListClearSort').hidden = !cutSort.length;
 
 $('#partsTable').addEventListener('change', (e) => {
   // the material's tick: every part in it on or off
@@ -2162,7 +2183,7 @@ $('#fetchParts').onclick = (e) => busy(e.target, async () => {
   refreshStatus();
 });
 const jobStamp = () => (job.name || 'job').replace(/[^\w-]+/g, '_').slice(0, 40);
-$('#cutListCsv').onclick = () => download(`${jobStamp()}_cutlist.csv`, cutListCSV(cutListRows(runParts().filter((p) => p.qty > 0))));
+$('#cutListCsv').onclick = () => download(`${jobStamp()}_cutlist.csv`, cutListCSV(sortCutRows(cutListRows(runParts().filter((p) => p.qty > 0)))));   // in the on-screen sort
 $('#cutListPrint').onclick = () => {
   printPreview(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(job.name || 'Cut list')}</title><style>
     @page{size:portrait;margin:0.5in}
@@ -2170,6 +2191,7 @@ $('#cutListPrint').onclick = () => {
     table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #ccc;padding:5px 8px;text-align:left}
     th{font-size:11px;text-transform:uppercase;color:#555}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
     table.cut-list th+th,table.cut-list td+td{border-left:1px solid #ccc}table.cut-list{border:1px solid #ccc}
+    tr.col-head th{background:#f6f6f6}sup{font-size:8px}
     tr.group td{background:#eee;font-weight:600}.muted{color:#777}.small{font-size:11px}</style></head><body>
     <section class="page"><h1>Cut list — ${esc(job.name || '')}</h1><p>${new Date().toLocaleDateString()} · parts not cut on the CNC</p>
     ${cutListHtml(cutListRows(runParts().filter((p) => p.qty > 0)))}</section></body></html>`, { title: 'Cut list', orient: 'portrait', margin: 0.5, kind: 'cutlist' });

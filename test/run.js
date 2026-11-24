@@ -15,7 +15,7 @@ import { SHAPE_ORDERS, placeShapes, isShapePart } from '../public/lib/shapes.js'
 import { normalizeAll } from '../lib/parts.js';
 import { decode } from '../lib/onshape.js';
 import { nestParts, placedGeometry, applySolution, nestKey } from '../public/lib/nest.js';
-import { sheetToolpaths, fillHoleBites, placeTabs, legsOf, splitLobes, legsFromWalls, offcutCutLines, screwR, screwCheck } from '../public/lib/toolpath.js';
+import { sheetTabs, sheetToolpaths, fillHoleBites, placeTabs, legsOf, splitLobes, legsFromWalls, offcutCutLines, screwR, screwCheck } from '../public/lib/toolpath.js';
 import { postGcode, postShopBot, post as postAny, fitArcs } from '../public/lib/post.js';
 import { parsePP } from '../public/lib/vpp.js';
 import { carve, check as simCheck } from '../public/lib/sim.js';
@@ -494,7 +494,9 @@ for (const g of groupParts(parts)) {
             if (L < 1) continue;
             const n = flats.filter((f) => f.own === k && Math.abs((f.M[0] - a[0]) * (b[1] - a[1]) - (f.M[1] - a[1]) * (b[0] - a[0])) / L < 0.01 &&
               ((f.M[0] - a[0]) * (b[0] - a[0]) + (f.M[1] - a[1]) * (b[1] - a[1])) / L > 0 && ((f.M[0] - a[0]) * (b[0] - a[0]) + (f.M[1] - a[1]) * (b[1] - a[1])) / L < L).length;
-            if (n > Math.max(1, Math.ceil(L / (tcfg.tabs.spacing || 18) - 1e-6)) + 0) crowded++;
+            // one per Spacing, rounded up; an edge may carry up to two more when a long
+            // part needs a tab near each end and that edge is where its ends can be held
+            if (n > Math.max(1, Math.ceil(L / (tcfg.tabs.spacing || 18) - 1e-6)) + 2) crowded++;
           }
         });
         partsNoTab += sh.placements.length - tabbedParts.size;
@@ -512,7 +514,7 @@ for (const g of groupParts(parts)) {
       }
     }
     check(offSheet === 0, `no tabs toward the sheet edge (${offSheet})`);
-    check(crowded === 0, `no straight edge has more than one tab per Spacing, rounded up (${crowded} crowded)`);
+    check(crowded === 0, `no straight edge has more than one tab per Spacing, rounded up, plus its end tabs (${crowded} crowded)`);
     check(unmatched === 0 && bridges > 0, `tabs facing a neighbour are shared bridges (${bridges / 2} bridges, ${unmatched} unmatched)`);
     check(partsNoTab === 0, `every part still gets a tab (${partsNoTab} without)`);
     console.log(`tab plan: ${flatsN} tab lifts, ${bridges / 2} shared bridges`);
@@ -1988,6 +1990,33 @@ function distSeg(p, a, b) {
   const tp3 = sheetToolpaths(sh, { ...s0, ...resolveTools(s0, lib3, []), thickness: g.thickness });
   const pz = [...new Set(tp3.moves.filter((m) => m.op === 'profile' && m.g === 1 && !m.plunge && m.z < 0).map((m) => +m.z.toFixed(4)))].sort((a, b) => b - a);
   check(Math.abs(pz[0] + 0.38) < 1e-6 && !tp3.warnings.some((x) => /profiles' first pass/.test(x)), `min stepdown: first profile pass at the min, not split equally (passes ${pz.join(', ')})`);
+}
+
+// smarter tabs: held at both ends, and a chain back to screwed-down waste
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const rect = (w, h) => [[0, 0], [w, 0], [w, h], [0, h]];
+  const P = (name, w, h) => ({ id: name, name, include: true, qty: 1, grain: 'none', thickness: 0.75, width: w, height: h, outline: rect(w, h), holes: [], pockets: [], material: 'T', custom: false });
+  const cfg = { ...s0, ...tl, thickness: 0.75, holdDown: 'tabs', screws: { ...s0.screws, on: true } };
+  const place = (part, x, y) => ({ part, x, y, rot: 0, w: part.width, h: part.height, label: part.name });
+  const corners = [{ x: 1, y: 1 }, { x: 95, y: 1 }, { x: 95, y: 47 }, { x: 1, y: 47 }];
+  // a stack of drawer sides half an inch apart: each one held within the end fifth at both ends
+  const stack = Array.from({ length: 5 }, (_, i) => place(P(`Side ${i + 1}`, 18, 6.6), 10, 10 + i * 7.1));
+  const tA = sheetTabs({ w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], screws: corners, placements: stack }, cfg).tabs;
+  const endsOk = stack.every((pl) => {
+    const xs = tA.filter((t) => t.y > pl.y - 0.5 && t.y < pl.y + 7.1 && t.x > pl.x - 0.6 && t.x < pl.x + 18.6).map((t) => t.x - pl.x);
+    return xs.some((x) => x <= 3.6 + 0.5) && xs.some((x) => x >= 18 - 3.6 - 0.5);
+  });
+  check(endsOk, 'tabs: every drawer side in a stack is held near both ends');
+  // a part in an island of waste with no screw (a ring of parts around it): no chain, so a warning
+  const ring = [place(P('Ring top', 30, 4), 20, 30), place(P('Ring bottom', 30, 4), 20, 14.25), place(P('Ring left', 4, 11.5), 20, 18.5), place(P('Ring right', 4, 11.5), 46, 18.5), place(P('Inner', 8, 4), 31, 22)];
+  const sheetB = { w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], screws: corners, screwsManual: true, placements: ring };
+  const wB = sheetToolpaths(sheetB, cfg).warnings.filter((w) => /no chain of tabs/.test(w));
+  check(wB.length === 1 && /Inner/.test(wB[0]) && !/Ring/.test(wB[0]), `tabs: a part only next to waste with no screw is reported (${wB.join(' | ') || 'none'})`);
+  // a screw in that island anchors it: no warning
+  const wC = sheetToolpaths({ ...sheetB, screws: [...corners, { x: 28, y: 24 }] }, cfg).warnings.filter((w) => /no chain of tabs/.test(w));
+  check(wC.length === 0, 'tabs: a screw in the island holds the part, no warning');
 }
 
 console.log(`\npocket lifts after first entry: ${liftTotal} across ${pocketTotal} pockets`);

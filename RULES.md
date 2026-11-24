@@ -74,6 +74,11 @@ toolpath / nesting code. Every rule here is a mistake that already happened once
 7. **Shared cut lines:** a line two parts share is cut once; before it's cut,
    both parts have had their holes, dados and cutouts done (perimeter last for
    every part). Never trade a sheet for shared edge or run-out room.
+7b. **Tabs hold to something that holds.** A tab only counts if the waste it
+   ties to is anchored (a screw in it; no screws: the biggest skeleton piece),
+   or it bridges to a part that is held — every part needs that chain, or the
+   sheet warns. Long parts get a tab near each end (end fifth) before the even
+   spread. `npm test` checks both, with a planted island part.
 8. **Optimize toolpaths for time whenever possible** — machine time from the
    machine profile (speeds, acceleration, bit changes), not inches of travel.
 9. **Every sample sheet must pass the cut simulation** (floors cut, nothing too

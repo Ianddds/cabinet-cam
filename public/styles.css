@@ -327,3 +327,7 @@ table.cut-list th + th, table.cut-list td + td { border-left: 1px solid var(--li
 table.cut-list th.sortable { cursor: pointer; user-select: none; }
 table.cut-list th.sortable:hover { color: var(--ink, #222); }
 table.cut-list th.sorted { color: var(--accent); }
+table.cut-list tr.col-head th { background: var(--bg); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); padding: 5px 8px; text-align: left; }
+table.cut-list tr.col-head th.num { text-align: right; }
+table.cut-list tr.col-head th.sorted { color: var(--accent); }
+table.cut-list th sup { font-size: 9px; margin-left: 1px; }

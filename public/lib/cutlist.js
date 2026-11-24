@@ -36,11 +36,12 @@ export function cutListRows(parts) {
 
 const csvCell = (v) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
 export function cutListCSV(rows) {
-  const head = ['Material', 'Qty', 'Part', 'Length', 'Width', 'Thickness', 'Length (in)', 'Width (in)', 'Thickness (in)', 'Cabinets', 'Part names'];
+  // same column order as the cut list on screen (Cabinets, Part, Qty, sizes, decimals)
+  const head = ['Material', 'Cabinets', 'Part', 'Qty', 'Length', 'Width', 'Thickness', 'Length (in)', 'Width (in)', 'Thickness (in)', 'Part names'];
   const lines = [head.join(',')];
   for (const r of rows) {
-    lines.push([r.material, r.qty, r.part, fraction(r.length), fraction(r.width), fraction(r.thickness),
-      r.length.toFixed(3), r.width.toFixed(3), r.thickness.toFixed(3), r.cabinets, r.names].map(csvCell).join(','));
+    lines.push([r.material, r.cabinets, r.part, r.qty, fraction(r.length), fraction(r.width), fraction(r.thickness),
+      r.length.toFixed(3), r.width.toFixed(3), r.thickness.toFixed(3), r.names].map(csvCell).join(','));
   }
   return lines.join('\n') + '\n';
 }

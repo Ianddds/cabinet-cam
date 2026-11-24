@@ -1250,9 +1250,19 @@ export function placeTabs(loop, opt, tool) {
 //            both parts at the same place, bridges the two and counts for both
 // Each part still gets its tab count (spacing, at least min); shared tabs count
 // toward it, and a part keeps at least one tab to the skeleton when it has room.
+//
+// What actually holds: the waste left once every outline is cut falls into
+// separate pieces. A piece is anchored if a hold-down screw is in it (with no
+// screws on the sheet, the biggest piece: the skeleton that's lifted off the
+// table). A tab into a piece that isn't anchored holds nothing ('loose'), so
+// tabs go on edges facing anchored waste, nearest the screws, and every part
+// must have a chain of tabs back to it: part -> anchored waste, or part ->
+// shared bridge -> part -> ... -> anchored waste. Nothing falls out when the
+// sheet comes off the machine. Long parts are held near both ends (a tab within
+// the end fifth of the part, at least one tab-width in), not just in the middle.
 // Sets x.tabs.spans = [[a, b], ...] (flat tops, tool-centre XY) on each item.
 const MIN_LIGAMENT = 0.25; // inch
-export function planSheetTabs(items, tool, sheet, warnings = []) {
+export function planSheetTabs(items, tool, sheet, warnings = [], screws = []) {
   const tabbed = items.filter((x) => x.tabs);
   if (!tabbed.length) return;
   const r = tool.dia / 2;
@@ -1265,6 +1275,35 @@ export function planSheetTabs(items, tool, sheet, warnings = []) {
     const loop = x.loops[x.loops.length - 1];
     return { x, loop, bb: bbox(loop), ccw: signedArea(loop) > 0 };
   });
+  // waste pieces once every outline is cut, and which of them are anchored
+  const pieces = [];
+  if (Number.isFinite(W) && Number.isFinite(H)) {
+    try {
+      const cut = [];
+      for (const o of info) {
+        let g = offset([o.loop], r, 'miter');
+        if (area(g) < Math.abs(signedArea(o.loop))) g = offset([o.loop.slice().reverse()], r, 'miter');
+        cut.push(...g);
+      }
+      const waste = difference([[[0, 0], [W, 0], [W, H], [0, H]]], union(cut, [], 'nonzero'));
+      const big = waste.reduce((m, l) => (Math.abs(signedArea(l)) > Math.abs(signedArea(m)) ? l : m), waste[0]);
+      const outerSign = big ? Math.sign(signedArea(big)) : 1;
+      const outers = waste.filter((l) => Math.sign(signedArea(l)) === outerSign).map((l) => ({ outer: l, holes: [], bb: bbox(l), a: Math.abs(signedArea(l)) }));
+      for (const h of waste.filter((l) => Math.sign(signedArea(l)) !== outerSign)) {
+        const own = outers.filter((o) => pointInPolygon(h[0], o.outer)).sort((a, b) => a.a - b.a)[0];
+        if (own) own.holes.push(h);
+      }
+      pieces.push(...outers);
+    } catch { /* no clipper: every free edge counts as anchored, as before */ }
+  }
+  const pieceAt = (q) => pieces.findIndex((pc) => q[0] >= pc.bb.x0 && q[0] <= pc.bb.x1 && q[1] >= pc.bb.y0 && q[1] <= pc.bb.y1 && inRegion(q, [pc.outer, ...pc.holes]));
+  const screwPts = (screws || []).map((q) => [q.x, q.y]);
+  if (pieces.length) {
+    if (screwPts.length) for (const q of screwPts) { const k = pieceAt(q); if (k >= 0) pieces[k].anchor = true; }
+    else pieces.reduce((m, pc) => (pc.a > m.a ? pc : m)).anchor = true;
+  }
+  const anchoredAt = (q) => { if (!pieces.length) return true; const k = pieceAt(q); return k >= 0 && !!pieces[k].anchor; };
+  const screwDist = (q) => (screwPts.length ? Math.min(...screwPts.map((s) => dist(s, q))) : 0);
   const nearLoop = (q, loop, lim) => {
     for (let i = 0; i < loop.length; i++) if (distToSeg(q, loop[i], loop[(i + 1) % loop.length]) < lim) return true;
     return false;
@@ -1281,7 +1320,9 @@ export function planSheetTabs(items, tool, sheet, warnings = []) {
       }
       if (q[0] < 0 || q[1] < 0 || q[0] > W || q[1] > H) off = true;
     }
-    return off ? 'open' : 'free';
+    if (off) return 'open';
+    // skeleton, but is that piece held down?
+    return anchoredAt([p[0] + n[0] * (r + MIN_LIGAMENT), p[1] + n[1] * (r + MIN_LIGAMENT)]) ? 'free' : 'loose';
   };
   // runs of one kind along each edge
   for (const me of info) {
@@ -1312,8 +1353,70 @@ export function planSheetTabs(items, tool, sheet, warnings = []) {
   // ordinary together), so a part with few free edges doesn't crowd one edge
   const sp = opt.spacing || 18;
   const budget = (len) => Math.max(1, Math.ceil(len / sp - 1e-6));
-  const hasRoom = (o, rn) => (o.used.get(rn.edge) || 0) < budget(rn.edgeLen);
+  const hasRoom = (o, rn, extra = 0) => (o.used.get(rn.edge) || 0) < budget(rn.edgeLen) + extra;
+  // an end that has to be held may put up to two tabs past an edge's budget (both ends on one edge)
   const useOne = (o, rn) => o.used.set(rn.edge, (o.used.get(rn.edge) || 0) + 1);
+  // a shared tab at c on my run rn: the same place on the neighbour's path, one
+  // tab both parts lift over. force: past the edges' budgets (an end that has
+  // to be held)
+  const bridge = (me, rn, c, force, other = info.find((o) => o.x.pi === rn.cls), theirs = (other?.runs || []).filter((q) => q.cls === me.x.pi)) => {
+    if (!other) return false;
+    const P = at(rn, c);
+    let fit = null;
+    for (const q of theirs) {
+      const tb = (P[0] - q.a[0]) * q.u[0] + (P[1] - q.a[1]) * q.u[1];
+      if (tb - lift / 2 - ramp >= q.t0 - 1e-6 && tb + lift / 2 + ramp <= q.t1 + 1e-6) { fit = { q, tb }; break; }
+    }
+    if (!fit) return false;
+    const ex = force ? 2 : 0;
+    if (!hasRoom(me, rn, ex) || !hasRoom(other, fit.q, ex)) return false;
+    if (me.spans.some((sp2) => dist([(sp2[0][0] + sp2[1][0]) / 2, (sp2[0][1] + sp2[1][1]) / 2], P) < need)) return false;
+    useOne(me, rn); useOne(other, fit.q);
+    me.spans.push(spanOn(rn, c)); other.spans.push(spanOn(fit.q, fit.tb));
+    me.shared++; other.shared++;
+    me.links.add(other.x.pi); other.links.add(me.x.pi);
+    return true;
+  };
+  // centre of a span, and where it sits along the part's long axis
+  const mid = (sp2) => [(sp2[0][0] + sp2[1][0]) / 2, (sp2[0][1] + sp2[1][1]) / 2];
+  // a tab's centre may go anywhere on a run from need/2 in from either end
+  const slotRange = (rn) => [rn.t0 + need / 2, rn.t1 - need / 2];
+  const clash = (me, P) => me.spans.some((sp2) => dist(mid(sp2), P) < need);
+  // first, both ends of every long part: a tab to anchored waste (or a shared
+  // bridge) within its end fifth, before the even spread uses up the edges
+  for (const me of info) {
+    if (!me.runs) continue;
+    me.anch = 0;
+    const ax = me.bb.w >= me.bb.h ? 0 : 1;
+    const lo = ax ? me.bb.y0 : me.bb.x0, hi = ax ? me.bb.y1 : me.bb.x1, L = hi - lo;
+    if (L >= 3 * need) {
+      const E = Math.max(need, 0.2 * L);
+      for (const [z0, z1, endAt] of [[lo, lo + E, lo], [hi - E, hi, hi]]) {
+        if (me.spans.some((sp2) => { const c = mid(sp2)[ax]; return c >= z0 - 1e-6 && c <= z1 + 1e-6; })) continue;
+        let best = null;
+        for (const rn of me.runs.filter((q) => q.cls === 'free' || typeof q.cls === 'number')) {
+          const [c0, c1] = slotRange(rn);
+          if (c1 < c0) continue;
+          // the run's slot range that lies in the end zone (runs are straight lines)
+          const pa = at(rn, c0)[ax], pb = at(rn, c1)[ax];
+          const tAt = (v) => (Math.abs(pb - pa) < 1e-9 ? null : c0 + ((v - pa) / (pb - pa)) * (c1 - c0));
+          let cands;
+          if (Math.abs(pb - pa) < 1e-9) cands = pa >= z0 - 1e-6 && pa <= z1 + 1e-6 ? [(c0 + c1) / 2] : [];   // an end edge: its middle
+          else cands = [tAt(endAt)].map((t) => Math.max(c0, Math.min(c1, t))).filter((t) => { const v = at(rn, t)[ax]; return v >= z0 - 1e-6 && v <= z1 + 1e-6; });
+          for (const t of cands) {
+            const P = at(rn, t);
+            if (clash(me, P) || !hasRoom(me, rn, 2)) continue;
+            // to anchored waste beats a bridge to the next part (which only holds
+            // if that part is held)
+            const score = Math.abs(P[ax] - endAt) + 0.25 * screwDist(P) + (rn.cls === 'free' ? 0 : 6);
+            if (!best || score < best.score) best = { rn, t, score };
+          }
+        }
+        if (best?.rn.cls === 'free') { me.spans.push(spanOn(best.rn, best.t)); useOne(me, best.rn); me.anch++; }
+        else if (best) bridge(me, best.rn, best.t, true);
+      }
+    }
+  }
   // shared edges: tabs placed once, on both parts
   for (const me of info) {
     if (!me.runs) continue;
@@ -1323,61 +1426,53 @@ export function planSheetTabs(items, tool, sheet, warnings = []) {
       const theirs = (other.runs || []).filter((q) => q.cls === me.x.pi);
       const len = rn.t1 - rn.t0;
       const k = Math.min(Math.floor(len / need), Math.round(len / (opt.spacing || 18)));
-      for (let i = 0; i < k; i++) {
-        const c = rn.t0 + (len * (i + 0.5)) / k;
-        const P = at(rn, c);
-        // the same place on the neighbour's path
-        let fit = null;
-        for (const q of theirs) {
-          const tb = (P[0] - q.a[0]) * q.u[0] + (P[1] - q.a[1]) * q.u[1];
-          if (tb - lift / 2 - ramp >= q.t0 - 1e-6 && tb + lift / 2 + ramp <= q.t1 + 1e-6) { fit = { q, tb }; break; }
-        }
-        if (!fit || !hasRoom(me, rn) || !hasRoom(other, fit.q)) continue;
-        useOne(me, rn); useOne(other, fit.q);
-        me.spans.push(spanOn(rn, c)); other.spans.push(spanOn(fit.q, fit.tb));
-        me.shared++; other.shared++;
-        me.links.add(other.x.pi); other.links.add(me.x.pi);
-      }
+      for (let i = 0; i < k; i++) bridge(me, rn, rn.t0 + (len * (i + 0.5)) / k, false, other, theirs);
     }
   }
-  // the rest of each part's tabs go on edges facing the skeleton
+  // the rest of each part's tabs go on edges facing anchored skeleton
   for (const me of info) {
     if (!me.runs) continue;
     const perim = me.loop.reduce((a, p, i) => a + dist(p, me.loop[(i + 1) % me.loop.length]), 0);
     const want = Math.max(opt.min || 1, Math.round(perim / (opt.spacing || 18)));
-    // (each edge's budget, shared tabs already counted, caps how many go there:
-    // a part whose other edges can't take tabs doesn't pile them onto one edge)
-    const free = me.runs.filter((rn) => rn.cls === 'free').map((rn) => {
+    const free = me.runs.filter((rn) => rn.cls === 'free');
+    // the rest: spread along anchored edges, the edges nearest a screw first
+    const fr = free.map((rn) => {
       const len = rn.t1 - rn.t0;
-      return { rn, len, cap: Math.min(Math.floor(len / need), budget(rn.edgeLen)), k: 0 };
+      return { rn, len, cap: Math.min(Math.floor(len / need), budget(rn.edgeLen)), k: 0, sd: screwDist(at(rn, (rn.t0 + rn.t1) / 2)) };
     });
-    const room = free.reduce((a, f) => a + f.cap, 0);
-    let n = Math.min(room, Math.max(room > 0 ? 1 : 0, want - me.shared));
+    const room = fr.reduce((a, f) => a + f.cap, 0);
+    let n = Math.min(room, Math.max(room > 0 && !me.anch ? 1 : 0, want - me.shared - me.anch));
+    const better = (f, b) => { const sf = f.len / (f.k + 1), sb = b.len / (b.k + 1); return Math.abs(sf - sb) > 1e-6 ? sf > sb : f.sd < b.sd; };
     for (; n > 0; n--) {
       let best = null;
-      for (const f of free) if (f.k < f.cap && hasRoom(me, f.rn) && (!best || f.len / (f.k + 1) > best.len / (best.k + 1))) best = f;
+      for (const f of fr) if (f.k < f.cap && hasRoom(me, f.rn) && (!best || better(f, best))) best = f;
       if (!best) {
-        // every edge is at its budget: still give the part one tab to the sheet if it has none
-        if (!free.some((f) => f.k) && free.length) best = free.reduce((b, f) => (f.cap > 0 && (!b || f.len > b.len) ? f : b), null);
+        // every edge is at its budget: still give the part one tab to anchored waste if it has none
+        if (!me.anch && !fr.some((f) => f.k) && fr.length) best = fr.reduce((b, f) => (f.cap > 0 && (!b || f.sd < b.sd) ? f : b), null);
         if (!best) break;
       }
       best.k++; useOne(me, best.rn);
     }
-    for (const f of free) for (let i = 0; i < f.k; i++) me.spans.push(spanOn(f.rn, f.rn.t0 + (f.len * (i + 0.5)) / f.k));
-    me.free = free.reduce((a, f) => a + f.k, 0);
+    for (const f of fr) for (let i = 0; i < f.k; i++) {
+      const P = f.rn.t0 + (f.len * (i + 0.5)) / f.k;
+      if (clash(me, at(f.rn, P))) continue;   // an end tab is already there
+      me.spans.push(spanOn(f.rn, P)); me.anch++;
+    }
+    me.free = me.anch;
     if (!me.spans.length) warnings.push(`${me.x.label}: no straight run with material past it long enough for a tab`);
   }
-  // parts tabbed only to each other, with nothing tying the group to the skeleton
-  const seen = new Set();
-  for (const me of info) {
-    if (!me.runs || seen.has(me.x.pi)) continue;
-    const group = [], todo = [me];
-    seen.add(me.x.pi);
-    while (todo.length) {
-      const g = todo.pop(); group.push(g);
-      for (const pi of g.links) { if (!seen.has(pi)) { seen.add(pi); todo.push(info.find((o) => o.x.pi === pi)); } }
-    }
-    if (group.length > 1 && !group.some((g) => g.free > 0)) warnings.push(`${group.map((g) => g.x.label).join(', ')}: only tabbed to each other, nothing holds them to the sheet`);
+  // every part needs a chain of tabs back to anchored waste (a screwed-down
+  // piece, or the skeleton): parts tabbed to anchored waste, then their shared
+  // bridges outward
+  const held = new Set(info.filter((o) => o.runs && o.anch > 0).map((o) => o.x.pi));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const o of info) if (o.runs && !held.has(o.x.pi) && [...o.links].some((pi) => held.has(pi))) { held.add(o.x.pi); grew = true; }
+  }
+  const orphans = info.filter((o) => o.runs && !held.has(o.x.pi));
+  if (orphans.length) {
+    const names = orphans.map((o) => o.x.label);
+    warnings.push(`${names.slice(0, 5).join(', ')}${names.length > 5 ? ` and ${names.length - 5} more` : ''}: no chain of tabs back to ${screwPts.length ? 'a screwed-down part of the sheet' : 'the sheet skeleton'} — ${screwPts.length ? 'add a screw in the waste next to them' : 'they would fall out when the sheet is lifted'}`);
   }
   for (const me of info) if (me.runs) me.x.tabs = { ...me.x.tabs, spans: me.spans };
 }
@@ -1800,7 +1895,7 @@ function profileItems(sheet, cfg, geo, warnings, pocketsOf = () => []) {
              pockets: pocketsOf(pi) };
   });
   if (manualTabs) placeManualTabs(items, tool, tabCfg, manualTabs, warnings);
-  else planSheetTabs(items, tool, sheet, warnings);
+  else planSheetTabs(items, tool, sheet, warnings, (cfg.screws?.on || sheet.screwsManual) && sheet.screws?.length ? sheet.screws : []);
   // where the tabs are (centres on the bit's path), for the sheet view
   const tabMarks = [];
   for (const x of items) for (const [p, q] of x.tabs?.spans || []) {
