@@ -1972,6 +1972,33 @@ function distSeg(p, a, b) {
   check(rap < 5, `side with top, bottom and back dados: ${rap.toFixed(1)}" of rapids inside the dados (was 200")`);
 }
 
+// a closet side with a U of cuts (rabbet up the left, dado across the bottom,
+// rabbet up the right that carries on to the bottom edge), from cut records,
+// one 5 mm bit: no trips across the part and back for the corners
+{
+  const s0 = structuredClone(DEFAULT_SETTINGS);
+  const tl = resolveTools(s0, DEFAULT_LIBRARY, []);
+  const bit = { ...tl.tool, id: 't5', name: '5 mm Straight', dia: 0.1969, feed: 250, stepdown: 0.15, minStepdown: 0.18, stepover: 0.77 };
+  const rect = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  const W = 59.25, H = 24.25, d = 0.26;
+  const part = { id: 'U', name: 'U', include: true, qty: 1, grain: 'none', thickness: 0.745, width: W, height: H, outline: rect(0, 0, W, H), holes: [], material: 'T', custom: false,
+    pockets: [
+      { loops: [rect(0, 0.998, 0.738, 22.75)], depth: d, walls: [{ cut: 'L', seg: [[0.738, 0.998], [0.738, 22.75]] }] },
+      { loops: [rect(0, 0.5, W, 0.998)], depth: d, walls: [{ cut: 'B', seg: [[0, 0.5], [W, 0.5]] }, { cut: 'B', seg: [[0.738, 0.998], [58.52, 0.998]] }] },
+      { loops: [rect(58.52, 0, W, 22.75)], depth: d, walls: [{ cut: 'R', seg: [[58.52, 0], [58.52, 0.5]] }, { cut: 'R', seg: [[58.52, 0.998], [58.52, 22.75]] }] },
+    ] };
+  const sheet = { w: 96, h: 48, trim: 0.1, trimX: 0.1, offcuts: [], placements: [{ part, x: 13.74, y: 23.63, rot: 0, w: W, h: H, label: 'U' }] };
+  const mv = sheetToolpaths(sheet, { ...s0, ...tl, tool: bit, dadoTool: null, dadoSameTool: true, thickness: 0.745 }).moves;
+  let on = false, rap = 0, prev = null, longest = 0;
+  for (const m of mv) {
+    if (m.comment) { on = / pocket /.test(m.comment); continue; }
+    if (!on || m.x == null) continue;
+    if (prev && m.g === 0) { const L = Math.hypot(m.x - prev.x, m.y - prev.y); rap += L; longest = Math.max(longest, L); }
+    prev = m;
+  }
+  check(longest < 30 && rap < 100, `U of rabbets and a dado: ${rap.toFixed(1)}" of rapids in the pocket, longest ${longest.toFixed(1)}" (was 180", with 58" trips across)`);
+}
+
 // min stepdown (compression bits): a routed first pass shallower than it is
 // warned about, the file is still made; drilling is never checked
 {

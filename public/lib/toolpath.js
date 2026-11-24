@@ -356,7 +356,21 @@ export function legsFromWalls(core, walls) {
   // every bit of floor must belong to some leg, or the records are incomplete
   const left = difference(core, union(legs.map(box), [], 'nonzero')).filter((l) => area([l]) > 1e-3);
   if (left.length) return null;
-  legs.forEach((lg, i) => { if (i) lg.clip = union(legs.slice(0, i).map(box), [], 'nonzero'); });
+  // each square where two legs cross belongs to one of them: the leg that runs
+  // on through it on both sides when the other ends there, else the longer one
+  const thru = (lg, J) => (lg.alongX ? lg.x0 < J.x0 - eps && lg.x1 > J.x1 + eps : lg.y0 < J.y0 - eps && lg.y1 > J.y1 + eps);
+  legs.forEach((lg, i) => {
+    const lose = [];
+    legs.forEach((o, k) => {
+      if (o === lg) return;
+      const J = { x0: Math.max(lg.x0, o.x0), y0: Math.max(lg.y0, o.y0), x1: Math.min(lg.x1, o.x1), y1: Math.min(lg.y1, o.y1) };
+      if (J.x1 - J.x0 < eps || J.y1 - J.y0 < eps) return;
+      const mine = thru(lg, J), theirs = thru(o, J);
+      if (theirs && !mine) lose.push(box(J));
+      else if (mine === theirs && k < i) lose.push(box(J));   // longer first (sorted)
+    });
+    if (lose.length) lg.clip = union(lose, [], 'nonzero');
+  });
   return legs;
 }
 
@@ -922,7 +936,10 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
           // a stub wholly in the air past an open edge (the bit can't reach the part) cuts nothing
           let touches = false;
           for (let k = 0; k <= 8 && !touches; k++) { const q = [p0[0] + ((p1[0] - p0[0]) * k) / 8, p0[1] + ((p1[1] - p0[1]) * k) / 8]; if (inRegion(q, reachPart)) touches = true; }
-          if (touches) segs.push([p0, p1]);
+          if (!touches) return;
+          const sg = [p0, p1];
+          if ((t1 - t0) * L < L - 0.05) sg.cutShort = true;   // the rest of this row is cut by a finishing pass
+          segs.push(sg);
         };
         for (let k = 0; k <= n; k++) {
           const t = k / n;
@@ -956,7 +973,9 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
       posList.forEach((p, k) => { const f = far(p); if (f > best + 1e-6) { best = f; si = k; } });
       const up = posList.slice(si + 1), down = posList.slice(0, si).reverse();
       const order = [posList[si], ...(up.length <= down.length ? [...up, ...down] : [...down, ...up])];
-      legPlans.push(order.map((pos) => segs.filter((sg) => Math.abs(across(sg[0]) - pos) < 1e-3)));
+      const lp = order.map((pos) => segs.filter((sg) => Math.abs(across(sg[0]) - pos) < 1e-3));
+      lp.alongX = alongX;
+      legPlans.push(lp);
     }
     // each relief goes with the finishing chain that passes nearest it
     for (const c of chains) c.reliefs = [];
@@ -2327,7 +2346,15 @@ function sheetPlan(sheet, cfg, joinSkip) {
         // order: it's cut whenever the bit passes, instead of pulling it across
         // the part and back (a back dado's two corner stubs before its long row)
         const stubLen = cfg.stubsFree === false ? -1 : 3 * dado.dia + 1e-6;
-        L.legPlans.forEach((lp, li) => lp.forEach((group, rank) => group.forEach((sg) => items.push({ sg, li, rank, free: dist(sg[0], sg[1]) <= stubLen }))));
+        // the end piece of a row whose rest runs along a finishing pass (at the
+        // corner of a U or L): free up to an inch, so it's cut from whichever
+        // end the bit is at instead of waiting on a row that runs the part's length
+        const shortLen = cfg.stubsFree === false ? -1 : 1.0 + 1e-6;
+        L.legPlans.forEach((lp, li) => lp.forEach((group, rank) => group.forEach((sg) => {
+          // the row's extent along the leg: it waits only for earlier rows beside it
+          const ax = lp.alongX === false ? 1 : 0;
+          items.push({ sg, li, rank, free: dist(sg[0], sg[1]) <= (sg.cutShort ? Math.max(stubLen, shortLen) : stubLen), lo: Math.min(sg[0][ax], sg[1][ax]), hi: Math.max(sg[0][ax], sg[1][ax]) });
+        })));
         // A leg's rows in places apart from each other (a groove's ends, where
         // it runs into a rabbet at each end of a drawer side) are kept in order
         // within each place, not across them: otherwise every rank goes to one
@@ -2349,6 +2376,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
         // the legs (each leg's rows still farthest-from-the-walls first), ending
         // near where the finishing starts. Lifting counts extra.
         const LIFT = 2;   // inches of travel a lift-and-plunge is worth
+        const ovTol = 0.02;
         const finStarts = L.chains.flatMap((c) => (c.closed ? c.pts : [c.pts[0], c.pts[c.pts.length - 1]]));
         const toFinish = (p) => (finStarts.length ? Math.min(...finStarts.map((q) => dist(p, q))) : 0);
         const legsOf = [...new Set(items.map((it) => it.li))];
@@ -2357,13 +2385,16 @@ function sheetPlan(sheet, cfg, joinSkip) {
           const seq = [];
           let here = start, cost = 0, first = true;
           while (left.length) {
-            const minRank = new Map();
-            for (const it of left) if (!it.free) minRank.set(it.li, Math.min(minRank.get(it.li) ?? Infinity, it.rank));
+            // a row waits for the leg's earlier-ranked rows that lie beside it
+            // (overlap along the leg), not for ones at the far end of the leg: the
+            // two ends of a wall-side row the finishing pass cut short go with
+            // whichever end the bit is at, not across the part and back
+            const waits = (it) => !it.free && left.some((o) => o !== it && !o.free && o.li === it.li && o.rank < it.rank && Math.min(o.hi, it.hi) - Math.max(o.lo, it.lo) > ovTol);
             // leg by leg: only the first unfinished leg in legOrder
-            const legNow = legOrder ? legOrder.find((li) => minRank.has(li) || left.some((it) => it.li === li)) : null;
+            const legNow = legOrder ? legOrder.find((li) => left.some((it) => it.li === li)) : null;
             let best = null;
             left.forEach((it, k) => {
-              if ((!it.free && it.rank !== minRank.get(it.li)) || (legNow != null && it.li !== legNow)) return;
+              if (waits(it) || (legNow != null && it.li !== legNow)) return;
               it.sg.forEach((e, ei) => {
                 const d = dist(e, here);
                 const sc = d + (first || d > 0.5 ? LIFT : 0);
