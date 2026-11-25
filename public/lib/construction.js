@@ -1,5 +1,5 @@
 // Construction sheets for the shop assembling the cabinets: one printable page
-// per cabinet with a front view (case, no fronts), a section through the middle,
+// per cabinet (or custom item: see splitCustom) with a front view (case, no fronts), a section through the middle,
 // the fronts, overall sizes, the heights of the fixed parts, drawer box sizes
 // and a parts list numbered to match the drawings. Drawn from where each part
 // sits in the Onshape model (lib/parts.js placeOf), so it is only as right as
@@ -15,18 +15,18 @@ const fr = (v) => fraction(Math.abs(v) < 1e-6 ? 0 : v);
 // fronts: hung on the case, drawn in their own view
 const FRONTS = new Set(['DOOR', 'DRAWER_FACE', 'DOOR_STILE', 'DOOR_RAIL', 'DOOR_PANEL']);
 // parts whose face looks out the front of the cabinet
-const FACING_FRONT = new Set([...FRONTS, 'FF_STILE', 'FF_RAIL']);
+const FACING_FRONT = new Set([...FRONTS, 'FF_STILE', 'FF_RAIL', 'FF_INNER_STILE', 'FF_INNER_RAIL', 'FF_BEAD']);
 const SIDES = new Set(['SIDE', 'END_PANEL', 'PARTITION', 'FILLER']);
 const DRAWER_BOX = new Set(['DRAWER_SIDE', 'DRAWER_FRONT', 'DRAWER_BACK', 'DRAWER_BOTTOM']);
 // fixed horizontal parts whose height the shop sets at assembly
 const LEVELS = new Set(['BOTTOM', 'TOP', 'FIXED_SHELF', 'STRETCHER', 'NAILER']);
 const ORDER = ['SIDE', 'END_PANEL', 'BOTTOM', 'TOP', 'STRETCHER', 'NAILER', 'BACK', 'PARTITION', 'FIXED_SHELF', 'ADJ_SHELF',
-  'TOE_KICK', 'TOE_SKIN', 'FILLER', 'FF_STILE', 'FF_RAIL', 'SLIDE_SPACER', 'DRAWER_SIDE', 'DRAWER_FRONT', 'DRAWER_BACK',
+  'TOE_KICK', 'TOE_SKIN', 'FILLER', 'FF_STILE', 'FF_RAIL', 'FF_INNER_STILE', 'FF_INNER_RAIL', 'FF_BEAD', 'SLIDE_SPACER', 'DRAWER_SIDE', 'DRAWER_FRONT', 'DRAWER_BACK',
   'DRAWER_BOTTOM', 'DOOR', 'DRAWER_FACE', 'DOOR_STILE', 'DOOR_RAIL', 'DOOR_PANEL', 'SHELF_NOSE', 'PANEL'];
 const WORDS = {
   SIDE: 'Side', END_PANEL: 'End panel', BOTTOM: 'Bottom', TOP: 'Top', STRETCHER: 'Stretcher', NAILER: 'Nailer', BACK: 'Back',
   PARTITION: 'Partition', FIXED_SHELF: 'Fixed shelf', ADJ_SHELF: 'Adjustable shelf', TOE_KICK: 'Toe kick', TOE_SKIN: 'Toe skin',
-  FILLER: 'Filler', FF_STILE: 'Frame stile', FF_RAIL: 'Frame rail', SLIDE_SPACER: 'Slide spacer', DRAWER_SIDE: 'Drawer side',
+  FILLER: 'Filler', FF_STILE: 'Frame stile', FF_RAIL: 'Frame rail', FF_INNER_STILE: 'Inner frame stile', FF_INNER_RAIL: 'Inner frame rail', FF_BEAD: 'Frame bead', SLIDE_SPACER: 'Slide spacer', DRAWER_SIDE: 'Drawer side',
   DRAWER_FRONT: 'Drawer box front', DRAWER_BACK: 'Drawer box back', DRAWER_BOTTOM: 'Drawer bottom', DOOR: 'Door',
   DRAWER_FACE: 'Drawer face', DOOR_STILE: 'Door stile', DOOR_RAIL: 'Door rail', DOOR_PANEL: 'Door panel', SHELF_NOSE: 'Shelf nosing', PANEL: 'Panel',
 };
@@ -254,10 +254,41 @@ function svgView(model, fs) {
  * places: from /api/extract (lib/parts.js placeOf), one per body.
  * opts: { job, where: Map(part name -> "Sheet 2 #7"), cabinets: Set of codes to print (all if absent) }
  */
+// Custom parts tagged without an item name (code CUSTOM): one item per group of
+// parts that touch in the model (CUSTOM-1, CUSTOM-2, ... left to right, front to
+// back), so each built-up piece gets its own page. A custom item with its own
+// code (Tag cabinet part / Cabinet extrude) is its own page already.
+const TOUCH = 0.06;   // inch: boxes this close count as touching
+export function splitCustom(places, code = 'CUSTOM') {
+  const mine = places.filter((p) => p.cabinet === code);
+  if (mine.length < 2) return places;
+  const bounds = mine.map((p) => {
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const c of p.corners) for (let d = 0; d < 3; d++) { lo[d] = Math.min(lo[d], c[d]); hi[d] = Math.max(hi[d], c[d]); }
+    return { lo, hi };
+  });
+  const up = mine.map((_, i) => i);
+  const find = (i) => (up[i] === i ? i : (up[i] = find(up[i])));
+  for (let i = 0; i < mine.length; i++) {
+    for (let j = i + 1; j < mine.length; j++) {
+      const a = bounds[i], b = bounds[j];
+      if ([0, 1, 2].every((d) => a.lo[d] <= b.hi[d] + TOUCH && b.lo[d] <= a.hi[d] + TOUCH)) up[find(i)] = find(j);
+    }
+  }
+  const groups = new Map();
+  mine.forEach((p, i) => { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(i); });
+  if (groups.size < 2) return places;
+  const lowest = (g) => g.reduce((m, i) => [Math.min(m[0], bounds[i].lo[0]), Math.min(m[1], bounds[i].lo[1])], [Infinity, Infinity]);
+  const order = [...groups.values()].sort((g, h) => { const a = lowest(g), b = lowest(h); return Math.abs(a[0] - b[0]) > 1 ? a[0] - b[0] : a[1] - b[1]; });
+  const name = new Map();
+  order.forEach((g, k) => g.forEach((i) => name.set(mine[i], `${code}-${k + 1}`)));
+  return places.map((p) => (name.has(p) ? { ...p, cabinet: name.get(p) } : p));
+}
+
 export function constructionHTML(places, opts = {}) {
   const byCab = new Map();
-  for (const p of places || []) {
-    if (!p.cabinet || (opts.cabinets && !opts.cabinets.has(p.cabinet))) continue;
+  const picked = (places || []).filter((p) => p.cabinet && !(opts.cabinets && !opts.cabinets.has(p.cabinet)));
+  for (const p of splitCustom(picked)) {
     if (!byCab.has(p.cabinet)) byCab.set(p.cabinet, []);
     byCab.get(p.cabinet).push(p);
   }
@@ -280,7 +311,9 @@ export function constructionHTML(places, opts = {}) {
     const view = svgView(model, fs);
     const fronts = model.parts.filter((p) => FRONTS.has(p.role));
     const tk = model.parts.filter((p) => p.role === 'TOE_KICK').reduce((m, p) => Math.max(m, p.b[5]), 0);
-    const sub = [`${fr(model.W)} W × ${fr(model.H)} H × ${fr(model.D)} D (case${fronts.length ? ', fronts off' : ''})`, tk ? `toe kick ${fr(tk)}` : '', `${model.parts.length} parts`].filter(Boolean).join('  ·  ');
+    // a custom item (all hand-made parts) has no case to speak of
+    const custom = byCab.get(code).every((p) => p.custom);
+    const sub = [`${fr(model.W)} W × ${fr(model.H)} H × ${fr(model.D)} D${custom ? (fronts.length ? ' (fronts off)' : '') : ` (case${fronts.length ? ', fronts off' : ''})`}`, tk ? `toe kick ${fr(tk)}` : '', `${model.parts.length} parts`].filter(Boolean).join('  ·  ');
     const table = rows.map((r) => `<tr${view.shown.has(r.no) ? '' : ' class="unseen"'}>
       <td class="n"><b>${r.no}</b></td><td>${esc(WORDS[r.role] || r.role || 'Part')}</td><td class="c">${r.parts.length}</td>
       <td class="n">${fr(r.size[0])} × ${fr(r.size[1])} × ${fr(r.size[2])}</td><td>${esc(r.material)}</td>

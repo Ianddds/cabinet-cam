@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import './clipper-node.js';
 import { sampleKitchen, rawPart, sampleCabinetPlaces } from './synthetic.js';
-import { cabinetModel, drawerBoxes, constructionHTML } from '../public/lib/construction.js';
+import { cabinetModel, drawerBoxes, constructionHTML, splitCustom } from '../public/lib/construction.js';
 import { moveRoom, applyMoves, moveKey, partKey, screwRoom } from '../public/lib/moveparts.js';
 import { parseProgram, timeline } from '../public/lib/gcodesim.js';
 import { cutLevels, cutMesh } from '../public/lib/exactcut.js';
@@ -1833,6 +1833,20 @@ function distSeg(p, a, b) {
   const html = constructionHTML([...kitchen, ...sampleCabinetPlaces(3)], { job: 'T', cabinets: new Set(['B30D', 'B24']) });
   check(html && (html.match(/class="page"/g) || []).length === 2, 'one page per chosen cabinet');
   check(constructionHTML([], {}) === null, 'nothing to draw: null');
+  // custom parts with no item name: one sheet per group of parts that touch
+  {
+    const bx = (name, x0, y0, z0, x1, y1, z1, cabinet = 'CUSTOM') => {
+      const corners = [];
+      for (const x of [x0, x1]) for (const y of [y0, y1]) for (const z of [z0, z1]) corners.push([x, y, z]);
+      return { name, cabinet, role: 'PANEL', material: 'M', cnc: true, custom: true, size: [1, 1, 1], n: [0, 0, 1], corners };
+    };
+    const ps = [bx('a1', 0, 0, 0, 0.75, 14, 30), bx('a2', 0.75, 0, 0, 20, 14, 0.75), bx('b1', 50, 0, 0, 60, 14, 0.75), bx('b2', 59.25, 0, 0, 60, 14, 20),
+      bx('n1', 100, 0, 0, 110, 10, 0.75, 'SEAT')];
+    const codes = splitCustom(ps).map((p) => p.cabinet);
+    check(codes.join() === 'CUSTOM-1,CUSTOM-1,CUSTOM-2,CUSTOM-2,SEAT', `custom items split by touch, named ones kept (${codes.join()})`);
+    const h = constructionHTML(ps, { job: 'T' });
+    check((h.match(/<section class="page">/g) || []).length === 3 && !/\(case/.test(h), 'one sheet per custom item, no "case" wording');
+  }
 }
 
 // ---------- drawer side: rabbet each end, bottom groove between them ----------

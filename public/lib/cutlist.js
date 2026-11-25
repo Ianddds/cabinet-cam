@@ -2,7 +2,7 @@
 // anything tagged cnc: false). Rows are merged identical parts.
 
 const ROLE_NAMES = {
-  FF_STILE: 'Stile', FF_RAIL: 'Rail', DOOR: 'Door', DRAWER_FACE: 'Drawer face', DOOR_STILE: 'Door stile', DOOR_RAIL: 'Door rail', DOOR_PANEL: 'Door panel', FILLER: 'Filler',
+  FF_STILE: 'Stile', FF_RAIL: 'Rail', FF_INNER_STILE: 'Inner stile', FF_INNER_RAIL: 'Inner rail', FF_BEAD: 'Bead', DOOR: 'Door', DRAWER_FACE: 'Drawer face', DOOR_STILE: 'Door stile', DOOR_RAIL: 'Door rail', DOOR_PANEL: 'Door panel', FILLER: 'Filler',
   PANEL: 'Panel', END_PANEL: 'End panel', TOE_SKIN: 'Toe kick skin', NAILER: 'Nailer',
 };
 export const roleName = (r) => ROLE_NAMES[r] || (r ? String(r).toLowerCase().replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase()) : '');
