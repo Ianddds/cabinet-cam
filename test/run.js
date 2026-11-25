@@ -229,7 +229,7 @@ for (const g of groupParts(parts)) {
             const lg = legBoxes.find((b) => mx >= b.x0 - 0.05 && mx <= b.x1 + 0.05 && my >= b.y0 - 0.05 && my <= b.y1 + 0.05);
             // a stepover at a row end is fine; a full cut across the dado is not
             const crossLen = lg ? (lg.alongX ? Math.abs(dy) : Math.abs(dx)) : 0;
-            if (lg && crossLen > 1e-4 && (crossLen > rTool * 2.1 + 1e-6 || Math.hypot(dx, dy) > rTool * 2.1 + 1e-6) &&
+            if (lg && crossLen > 0.005 && (crossLen > rTool * 2.1 + 1e-6 || Math.hypot(dx, dy) > rTool * 2.1 + 1e-6) &&
               !overCleared([prevP.x, prevP.y], [m.x, m.y], m.z)) across++;
             done.push({ a: [prevP.x, prevP.y], b: [m.x, m.y], z: m.z });
           }
@@ -1835,6 +1835,52 @@ function distSeg(p, a, b) {
   check(constructionHTML([], {}) === null, 'nothing to draw: null');
 }
 
+// ---------- drawer side: rabbet each end, bottom groove between them ----------
+// The wall passes are straight rows on the wall lines (no detour round the
+// corner into the groove's mouth and back), and a groove exactly the bit's
+// width still gets its pass (it used to erode away to nothing, uncut).
+{
+  const s = structuredClone(DEFAULT_SETTINGS); s.holdDown = 'tabs';
+  const tl = resolveTools(s, DEFAULT_LIBRARY, []);
+  const W = 17.964, H = 6.883, T = 0.472, rb = 0.472, dep = 0.236;
+  const rect = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  const part = { id: 'DS', name: 'DRAWER_SIDE', include: true, qty: 1, grain: 'length', thickness: T, width: W, height: H, outline: rect(0, 0, W, H), holes: [], material: 'BB',
+    pockets: [
+      { loops: [rect(0, 0, rb, H)], depth: dep, walls: [{ cut: 'L', seg: [[rb, 0], [rb, H]] }] },
+      { loops: [rect(W - rb, 0, W, H)], depth: dep, walls: [{ cut: 'R', seg: [[W - rb, 0], [W - rb, H]] }] },
+      { loops: [rect(0, 0.5, W, 0.75)], depth: dep, walls: [{ cut: 'G', seg: [[rb, 0.5], [W - rb, 0.5]] }, { cut: 'G', seg: [[rb, 0.75], [W - rb, 0.75]] }] },
+    ] };
+  const sheet = { w: 96, h: 48, trim: 0.12, trimX: 0.12, offcuts: [], placements: [{ part, x: 1, y: 1, rotated: false, w: W, h: H, label: 'DS' }] };
+  for (const dia of [0.25, 0.1969]) {
+    const bit = { ...tl.tool, dia, stepdown: 0.25, feed: 200, minStepdown: 0 };
+    const tp = sheetToolpaths(sheet, { ...s, ...tl, tool: bit, dadoTool: null, dadoSameTool: true, thickness: T });
+    let on = false, prev = null, short = 0, outside = 0;
+    for (const m of tp.moves) {
+      if (m.comment) { on = / pocket /.test(m.comment); continue; }
+      if (m.x == null) continue;
+      if (on && prev && m.g === 1 && m.z < 0 && !m.plunge) {
+        const L = Math.hypot(m.x - prev.x, m.y - prev.y);
+        if (L > 1e-4 && L < 0.1) short++;
+        // across the groove's mouth, out past the part's end: the old turn-back
+        const gy = (m.y + prev.y) / 2 - 1;
+        if (gy > 0.5 && gy < 0.75 && Math.abs(m.y - prev.y) > 0.02 && ((m.x - 1) < 0 || (m.x - 1) > W)) outside++;
+      }
+      prev = m;
+    }
+    const opts = { dia, profileDia: dia, thickness: T, holdDown: 'tabs', tabs: tp.tabs };
+    const sim = simCheck(sheet, carve(sheet, tp.moves, { res: 0.02, dia }), opts);
+    check(sim.ok && short === 0 && outside === 0, `drawer side, ${dia}" bit: rabbets and groove cut clean, no little moves round the groove ends (${short} short, ${outside} turn-backs, sim ${sim.ok ? 'ok' : JSON.stringify(sim)})`);
+    const along = tp.moves.filter((m) => m.x != null && m.g === 1 && m.z < 0 && Math.abs(m.y - 1 - 0.625) < 0.06 && m.x - 1 > 8 && m.x - 1 < 10).length
+      + tp.moves.filter((m, i) => i > 0 && m.g === 1 && m.z < 0 && Math.abs(m.y - 1 - (dia === 0.25 ? 0.625 : 0.598)) < 0.01 && Math.abs(m.x - tp.moves[i - 1].x) > 10).length;
+    check(along > 0, `drawer side, ${dia}" bit: the groove gets its pass`);
+    if (dia === 0.25) {
+      // the cut check sees a groove exactly the bit's width: leave its pass out
+      const noGroove = tp.moves.filter((m, i) => !(i > 0 && m.g === 1 && m.z < 0 && Math.abs(m.y - 1 - 0.625) < 0.01 && Math.abs(tp.moves[i - 1].y - 1 - 0.625) < 0.01));
+      check(simCheck(sheet, carve(sheet, noGroove, { res: 0.02, dia }), opts).uncut > 0, 'cut check catches an uncut groove the width of the bit');
+    }
+  }
+}
+
 // ---------- slow plunge entry only into the sheet's face ----------
 // A stepdown into floor an earlier level already cut has no face to enter: no
 // entry-ipm plunge there, and the rapid down stops just above that floor.
@@ -1875,7 +1921,8 @@ function distSeg(p, a, b) {
     }
   }
   check(slowInCut === 0, `stepdowns into cleared floor plunge without the slow entry (${slowInCut} still slow)`);
-  check(rapidsDown > 10 && steps > 10, `stepdowns rapid down into the cleared floor (${rapidsDown} rapids down, ${steps} plunges from there)`);
+  // (fewer since a drawer side's legs are cut whole with straight wall rows, 2026-11-24: fewer lifts to come back down)
+  check(rapidsDown >= 5 && steps >= 5, `stepdowns rapid down into the cleared floor (${rapidsDown} rapids down, ${steps} plunges from there)`);
   check(intoStock === 0, `no rapid goes down into uncut stock (${intoStock})`);
 }
 

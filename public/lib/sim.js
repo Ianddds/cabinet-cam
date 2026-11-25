@@ -109,7 +109,11 @@ export function check(sheet, sim, opts = {}) {
     const inner = raster(offset(material, -res * 0.75, 'miter'), sim, ...box);
     const floors = g.pockets.map((q) => {
       const fl = union(q.loops, []);
-      const reach = offset(offset(fl, -(r + res), 'round'), r, 'round');
+      // where the bit's centre can go (eroded a cell short of the radius, then
+      // its own stroke) - plus the centre line itself, so a slot exactly the
+      // bit's width (where the first erosion leaves nothing) is still checked
+      const centre = offset(fl, -(r - 0.0005), 'round');
+      const reach = union([...offset(offset(fl, -(r + res), 'round'), r, 'round'), ...(centre.length ? offset(centre, res * 0.5, 'round') : [])], [], 'nonzero');
       return { depth: q.depth, near: raster(offset(fl, res * 0.75, 'miter'), sim, ...box), reach: raster(reach, sim, ...box), box: bb(fl, res) };
     });
     // too deep: only cells that were cut can be

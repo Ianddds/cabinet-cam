@@ -363,16 +363,21 @@ export function legsFromWalls(core, walls) {
   // on through it on both sides when the other ends there, else the longer one
   const thru = (lg, J) => (lg.alongX ? lg.x0 < J.x0 - eps && lg.x1 > J.x1 + eps : lg.y0 < J.y0 - eps && lg.y1 > J.y1 + eps);
   legs.forEach((lg, i) => {
-    const lose = [];
+    const lose = [], loseRun = [];
     legs.forEach((o, k) => {
       if (o === lg) return;
       const J = { x0: Math.max(lg.x0, o.x0), y0: Math.max(lg.y0, o.y0), x1: Math.min(lg.x1, o.x1), y1: Math.min(lg.y1, o.y1) };
       if (J.x1 - J.x0 < eps || J.y1 - J.y0 < eps) return;
       const mine = thru(lg, J), theirs = thru(o, J);
-      if (theirs && !mine) lose.push(box(J));
-      else if (mine === theirs && k < i) lose.push(box(J));   // longer first (sorted)
+      // (clipRun, for straight wall rows: a square at the end of this leg goes
+      // with its run-out past the part edge, else the rows stub out into the air
+      // there and turn back)
+      const Jx = { ...J };
+      if (lg.alongX) { if (J.x0 - lg.x0 < eps) Jx.x0 -= 1; if (lg.x1 - J.x1 < eps) Jx.x1 += 1; }
+      else { if (J.y0 - lg.y0 < eps) Jx.y0 -= 1; if (lg.y1 - J.y1 < eps) Jx.y1 += 1; }
+      if ((theirs && !mine) || (mine === theirs && k < i)) { lose.push(box(J)); loseRun.push(box(Jx)); }   // longer first (sorted)
     });
-    if (lose.length) lg.clip = union(lose, [], 'nonzero');
+    if (lose.length) { lg.clip = union(lose, [], 'nonzero'); lg.clipRun = union(loseRun, [], 'nonzero'); }
   });
   return legs;
 }
@@ -650,7 +655,9 @@ function centreRegion(floorIn, g, r, ext, openExtra = [], avoid = []) {
   const outside = difference([zone], partRegion);
   // (clipper's own output: outers and holes already wound opposite ways)
   const free = union([...floor, ...outside, ...openExtra], [], 'nonzero');
-  const eroded = offset(free, -r, 'round');
+  // (half a thou short of the radius: a groove exactly the bit's width keeps a
+  // centre line to cut along instead of vanishing; no wall moves measurably)
+  const eroded = offset(free, -(r - BIT_FIT), 'round');
   // the band the centre uses inside the floor, pushed straight out (never
   // sideways) from each of its edges that lies on the part's edge
   const band = intersect(eroded, floor).filter((l) => area([l]) > 1e-7);
@@ -880,6 +887,27 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
     const legs = rec || legsOf(core);
     const edges = finishedEdges(floor, isOpen);
     const chains = finishChains(allowed, edges, isOpen, r, ext, opts.finishClimb);
+    // Chain order (legs, no finish pass): each wall pass is a straight row on the
+    // wall line, cut as its leg's last row; it runs straight through where another
+    // leg opens off the wall (a groove into a rabbet) instead of following the
+    // edge into the mouth and back out. Only closed laps (a pocket walled all
+    // round) stay as wall passes, so only they trim rows. Only for a pocket that
+    // is plain rectangles (no reliefs, no notch or curve in a wall): any other
+    // wall keeps its chain, which follows it exactly.
+    let rowWalls = !!legs && !finishPass && !plunges.length;
+    if (rowWalls) {
+      const lu = intersect(union(legs.map((lg) => [[lg.x0, lg.y0], [lg.x1, lg.y0], [lg.x1, lg.y1], [lg.x0, lg.y1]]), [], 'nonzero'), partRegion);
+      rowWalls = area(difference(floor, lu)) < 1e-4 && area(difference(lu, floor)) < 1e-4;
+      // and every wall runs along a leg's side, and every leg runs out past the
+      // part's edge at both ends (a closed end, or a stopped rabbet, keeps the
+      // chain: rows alone leave the bit at the far end to lift back)
+      const onSide = (e) => legs.some((lg) => (lg.alongX
+        ? Math.abs(e.a[1] - e.b[1]) < 1e-4 && (Math.abs(e.a[1] - lg.y0) < 1e-3 || Math.abs(e.a[1] - lg.y1) < 1e-3)
+        : Math.abs(e.a[0] - e.b[0]) < 1e-4 && (Math.abs(e.a[0] - lg.x0) < 1e-3 || Math.abs(e.a[0] - lg.x1) < 1e-3)));
+      const runsOut = (lg, hi) => isOpen(lg.alongX ? [hi ? lg.x1 + 0.02 : lg.x0 - 0.02, (lg.y0 + lg.y1) / 2] : [(lg.x0 + lg.x1) / 2, hi ? lg.y1 + 0.02 : lg.y0 - 0.02]);
+      if (rowWalls) rowWalls = edges.filter((e) => e.finished && dist(e.a, e.b) > 1e-3).every(onSide) && legs.every((lg) => runsOut(lg, false) && runsOut(lg, true));
+    }
+    const trimBy = rowWalls ? chains.filter((c) => c.closed) : chains;
     if (opts.finishEither) for (const c of chains) c.either = true;
     const inside = (p) => inOrOn(p, allowed, 3e-3);
     // fully enclosed, not square-sided: morphed spiral (ends with the wall lap)
@@ -907,7 +935,8 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
         const others = legs.filter((o) => o !== leg).map((o) => rect(o, 0));
         let region = intersect(rowsAllowed, [rect(leg, ext + 1e-3)]).filter((l) => area([l]) > 1e-5);
         if (others.length) region = difference(region, difference(union(others, [], 'nonzero'), [rect(leg, 1e-3)]));
-        const mine = leg.clip ? difference(region, leg.clip) : region;
+        const legClip = rowWalls ? leg.clipRun || leg.clip : leg.clip;
+        const mine = legClip ? difference(region, legClip) : region;
         const use = mine.filter((l) => area([l]) > 1e-5);
         // rows spaced across the leg's own width (wall to wall), not across the
         // wider area where it opens into a rabbet or slot: a 3/4" dado with a 3/8"
@@ -941,7 +970,9 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
             const [c0, c1] = leg.alongX ? [leg.y0, leg.y1] : [leg.x0, leg.x1];
             if (full.length) for (const [w, at] of [[wallAt(c0), c0 + r + 1e-4], [wallAt(c1), c1 - r - 1e-4]]) if (w) rows.push(...planRows(full, leg.alongX, legStep, false, [at, at]));
           }
-          rowSets.push({ alongX: leg.alongX, leg: legI, rows });
+          // (straight wall rows: the rows on a wall line are the wall's finish)
+          const wallPos = rowWalls && range ? [wallAt(leg.alongX ? leg.y0 : leg.x0) ? range[0] : null, wallAt(leg.alongX ? leg.y1 : leg.x1) ? range[1] : null].filter((v) => v != null) : [];
+          rowSets.push({ alongX: leg.alongX, leg: legI, rows, wallPos });
         }
       }
     } else {
@@ -949,7 +980,7 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
       const ax = cb.w >= cb.h;
       rowSets.push({ alongX: ax, rows: planRows(allowed, ax, legStep, false, null) });
     }
-    for (const { alongX, rows, leg: legI } of rowSets) {
+    for (const { alongX, rows, leg: legI, wallPos = [] } of rowSets) {
       const across = (p) => (alongX ? p[1] : p[0]);
       const segs = [];
       for (const row of rows) {
@@ -966,12 +997,13 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
           if (!touches) return;
           const sg = [p0, p1];
           if ((t1 - t0) * L < L - 0.05) sg.cutShort = true;   // the rest of this row is cut by a finishing pass
+          if (wallPos.some((w) => Math.abs(across(p0) - w) < 1e-3)) sg.onWall = true;
           segs.push(sg);
         };
         for (let k = 0; k <= n; k++) {
           const t = k / n;
           const q = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-          const covered = chains.some((c) => distToPoly(q, c.pts, c.closed) <= 0.01);
+          const covered = trimBy.some((c) => distToPoly(q, c.pts, c.closed) <= 0.01);
           if (!covered && runStart === null) runStart = t;
           if ((covered || k === n) && runStart !== null) { pushRun(runStart, covered ? Math.max(runStart, t - 1 / n) : t); runStart = null; }
         }
@@ -979,9 +1011,9 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
       // a row whose whole cut the wall passes make anyway (and what a deeper
       // depth takes away later) isn't needed: left out, so it can't pin where
       // the depth has to start (a stub left where a slot meets a deeper rabbet)
-      if (segs.length && chains.length) {
+      if (segs.length && trimBy.length) {
         const keepFloor = openExtra.length ? difference(floor, openExtra) : floor;
-        const walls = union(chains.flatMap((c) => sweptOf(c.closed ? [...c.pts, c.pts[0]] : c.pts, r + 1e-3)), [], 'nonzero');
+        const walls = union(trimBy.flatMap((c) => sweptOf(c.closed ? [...c.pts, c.pts[0]] : c.pts, r + 1e-3)), [], 'nonzero');
         for (let k = segs.length - 1; k >= 0; k--) {
           if (dist(segs[k][0], segs[k][1]) > 3 * tool.dia) continue;   // only stubs: a dado's middle row stays (walls last)
           const need = intersect(sweptOf(segs[k], r - 0.004), keepFloor);
@@ -1014,14 +1046,11 @@ function planGroup(pockets, g, tool, warnings, label, opts) {
       for (const c of chains) { const d = distToPoly(target, c.pts, c.closed); if (d < bd) { bd = d; bc = c; } }
       if (bc && bd < r + 0.05) bc.reliefs.push(q); else loose.push(q);
     }
-    // Chain order (no finish pass): each wall pass is split where it crosses from
-    // one leg into the next, and each piece is cut as that leg's last row, so a
-    // leg is finished before the bit moves on. Closed laps (a pocket walled all
-    // round) stay as they were. With a finish pass the wall passes wait for the
-    // bottom depth; above it they're left off (their reliefs plunge on their own).
     let wallPcs = [];
     let runChains = chains;
-    if (legs && !finishPass) {
+    if (rowWalls) {
+      runChains = chains.filter((c) => c.closed);
+    } else if (legs && !finishPass) {
       const tolE = r + ext + 0.02;
       const inRect = (p, lg, e) => p[0] >= lg.x0 - e && p[0] <= lg.x1 + e && p[1] >= lg.y0 - e && p[1] <= lg.y1 + e;
       const rectD = (p, lg) => Math.hypot(Math.max(lg.x0 - p[0], 0, p[0] - lg.x1), Math.max(lg.y0 - p[1], 0, p[1] - lg.y1));
@@ -1366,6 +1395,8 @@ export function placeTabs(loop, opt, tool) {
 // the end fifth of the part, at least one tab-width in), not just in the middle.
 // Sets x.tabs.spans = [[a, b], ...] (flat tops, tool-centre XY) on each item.
 const MIN_LIGAMENT = 0.25; // inch
+// a slot the bit's own width still fits it
+const BIT_FIT = 0.0005;
 // a thin strip of waste (less than MIN_LIGAMENT) is held this close to a screw in it
 const SCREW_HOLD = 6;
 // every outside corner of a part gets a tab this close (centre to corner), so no end lifts and chatters
@@ -2511,7 +2542,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
         L.legPlans.forEach((lp, k) => lp.forEach((group, rank) => group.forEach((sg) => {
           // the row's extent along the leg: it waits only for earlier rows beside it
           const ax = lp.alongX === false ? 1 : 0;
-          items.push({ sg, li: lp.leg ?? k, rank, free: dist(sg[0], sg[1]) <= (sg.cutShort ? Math.max(stubLen, shortLen) : stubLen), lo: Math.min(sg[0][ax], sg[1][ax]), hi: Math.max(sg[0][ax], sg[1][ax]) });
+          items.push({ sg, onWall: !!sg.onWall, li: lp.leg ?? k, rank, free: dist(sg[0], sg[1]) <= (sg.cutShort ? Math.max(stubLen, shortLen) : stubLen), lo: Math.min(sg[0][ax], sg[1][ax]), hi: Math.max(sg[0][ax], sg[1][ax]) });
         })));
         // chain order: each leg's piece of the wall pass is its last row (either way)
         for (const w of L.walls || []) {
@@ -2610,7 +2641,7 @@ function sheetPlan(sheet, cfg, joinSkip) {
           if (it && it.wall) { runPath(chainPath(it.wall, a, (p) => inOrOn(p, L.allowed, 3e-3)), 'finish'); continue; }
           P.op = 'pocket';
           goTo(a[0], a[1], [b]);
-          P.op = 'pocket';
+          P.op = it?.onWall ? 'finish' : 'pocket';
           feedTo(b[0], b[1]);
         }
         // finishing: every finished edge, nearest pass first
